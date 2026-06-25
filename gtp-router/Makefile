@@ -1,59 +1,67 @@
-ARCH		:= $(shell uname -m)
-KERN_HDRS	:= /usr/include/$(ARCH)-linux-gnu
+ARCH      := $(shell uname -m)
+# libbpf expects arm64, not aarch64 — remap for ARM64 hosts
+BPF_ARCH  := $(shell uname -m | sed 's/aarch64/arm64/')
+KERN_HDRS := /usr/include/$(ARCH)-linux-gnu
 
-OUT_DIR		:= build
-BPF_SRC		:= ebpf/gtp_xdp.c
-BPF_OBJ		:= $(OUT_DIR)/gtp_xdp.o
+OUT_DIR  := build
+BPF_SRC  := ebpf/gtp_xdp.c
+BPF_OBJ  := $(OUT_DIR)/gtp_xdp.o
+GTP_CTRL := $(OUT_DIR)/gtp-ctrl
 
-BPF_CFLAGS:=\
-	-O2 -g \
-	-target bpf \
-	-D__TARGET_ARCH_$(ARCH) \
-	-I ./include \
-	-I$(KERN_HDRS) \
-	-Wall -Wno-unused-value -Wno-pointer-sign \
-	-Wno-compare-distinct-pointer-types
+GENERATED := control/loader/gtpxdp_bpfel.go \
+             control/loader/gtpxdp_bpfel.o
 
-IF		?=eth0
-XDP_MODE 	?= native 
+BPF_CFLAGS := \
+    -O2 -g \
+    -target bpf \
+    -D__TARGET_ARCH_$(BPF_ARCH) \
+    -I./include \
+    -I$(KERN_HDRS) \
+    -Wall \
+    -Wno-unused-value \
+    -Wno-pointer-sign \
+    -Wno-compare-distinct-pointer-types
 
-.PHONY: all ebpf skel load unload clean
-all:ebpf
+IF       ?= eth0
+XDP_MODE ?= native
+
+.PHONY: all ebpf generate build load unload info clean
+
+# Full build: C → bpf2go → Go binary
+all: ebpf generate build
 
 $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
 
-# compile the bpf object
-
-ebpf:$(OUT_DIR) $(BPF_OBJ)
+# Step 1: compile the BPF C program to a BPF ELF object
+ebpf: $(OUT_DIR) $(BPF_OBJ)
 
 $(BPF_OBJ): $(BPF_SRC) include/gtp_router.h
 	clang $(BPF_CFLAGS) -c $(BPF_SRC) -o $(BPF_OBJ)
 	@echo "BPF object: $(BPF_OBJ)"
-	@llvm-objdump -h $(BPF_OBJ) | grep -E "^[[:space:]]+[0-9]|Name"
 
-# generate bpf2go skeleton for control plane
-skel: $(BPF_OBJ)
-	bpftool gen skeleton $(BPF_O) name gtp_xdp>$(OUT_DIR)/gtp_xdp.skel.h
-	@echo "Skeleton header: $(OUT_DIR)/gtp_xdp.skel.h"
+# Step 2: run bpf2go — embeds the .o into Go source and generates typed structs
+generate: $(BPF_OBJ)
+	cd control && go generate ./...
+	@echo "Generated: $(GENERATED)"
 
-# load via iproute2 (for manual testing without go loader)
-load:$(BPF_OBJ)
-	ip link set dev $(IF) xdp$(if $(filter offload, $(XDP_MODE)),offload,\
-		$(if $(filter generic, $(XDP_MODE)), generic,)) \
-		obj $(BPF_OBJ) sec xdp
-	@echo "XDP program attached to $(IF) (mode: $(XDP_MODE))"
+# Step 3: compile the Go binary (includes the embedded .o via go:embed)
+build: $(GENERATED)
+	cd control && go build -o ../$(GTP_CTRL) .
+	@echo "Binary: $(GTP_CTRL)"
+
+# Manual attach via iproute2 (useful for testing without the Go binary)
+load: $(BPF_OBJ)
+	ip link set dev $(IF) xdp obj $(BPF_OBJ) sec xdp
+	@echo "XDP attached to $(IF)"
 
 unload:
 	ip link set dev $(IF) xdp off
-	@echo "XDP program detached from $(IF)"
+	@echo "XDP detached from $(IF)"
 
-#inspect loaded program
 info:
 	bpftool prog show
 	bpftool map show
 
 clean:
-	rm -rf $(OUT_DIR)
-	@echo "cleaned"
-
+	rm -rf $(OUT_DIR) $(GENERATED)
