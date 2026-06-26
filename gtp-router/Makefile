@@ -8,8 +8,7 @@ BPF_SRC  := ebpf/gtp_xdp.c
 BPF_OBJ  := $(OUT_DIR)/gtp_xdp.o
 GTP_CTRL := $(OUT_DIR)/gtp-ctrl
 
-GENERATED := control/loader/gtpxdp_bpfel.go \
-             control/loader/gtpxdp_bpfel.o
+GENERATED := control/loader/gtpxdp_bpfel.go
 
 BPF_CFLAGS := \
     -O2 -g \
@@ -30,23 +29,27 @@ XDP_MODE ?= native
 # Full build: C → bpf2go → Go binary
 all: ebpf generate build
 
-$(OUT_DIR):
-	mkdir -p $(OUT_DIR)
-
 # Step 1: compile the BPF C program to a BPF ELF object
-ebpf: $(OUT_DIR) $(BPF_OBJ)
+ebpf: $(BPF_OBJ)
 
 $(BPF_OBJ): $(BPF_SRC) include/gtp_router.h
+	mkdir -p $(OUT_DIR)
 	clang $(BPF_CFLAGS) -c $(BPF_SRC) -o $(BPF_OBJ)
 	@echo "BPF object: $(BPF_OBJ)"
 
+# bpf2go runs from control/, so remap the include path accordingly.
+BPF2GO_CFLAGS := $(patsubst -I./include,-I../include,$(BPF_CFLAGS))
+
 # Step 2: run bpf2go — embeds the .o into Go source and generates typed structs
-generate: $(BPF_OBJ)
-	cd control && go generate ./...
+$(GENERATED): $(BPF_OBJ)
+	cd control && BPF_CLANG=clang BPF_CFLAGS="$(BPF2GO_CFLAGS)" go generate ./loader/...
 	@echo "Generated: $(GENERATED)"
 
+generate: $(GENERATED)
+
 # Step 3: compile the Go binary (includes the embedded .o via go:embed)
-build: $(GENERATED)
+build: generate
+	mkdir -p $(OUT_DIR)
 	cd control && go build -o ../$(GTP_CTRL) .
 	@echo "Binary: $(GTP_CTRL)"
 
@@ -64,4 +67,4 @@ info:
 	bpftool map show
 
 clean:
-	rm -rf $(OUT_DIR) $(GENERATED)
+	rm -rf $(OUT_DIR) control/loader/gtpxdp_bpfel.go control/loader/gtpxdp_bpfeb.go
