@@ -40,15 +40,18 @@ $(BPF_OBJ): $(BPF_SRC) include/gtp_router.h
 # bpf2go runs from control/, so remap the include path accordingly.
 BPF2GO_CFLAGS := $(patsubst -I./include,-I../include,$(BPF_CFLAGS))
 
+control/go.sum: control/go.mod control/tools.go
+	cd control && go mod tidy
+
 # Step 2: run bpf2go — embeds the .o into Go source and generates typed structs
-$(GENERATED): $(BPF_OBJ)
+$(GENERATED): $(BPF_OBJ) control/go.sum
 	cd control && BPF_CLANG=clang BPF_CFLAGS="$(BPF2GO_CFLAGS)" go generate ./loader/...
 	@echo "Generated: $(GENERATED)"
 
 generate: $(GENERATED)
 
 # Step 3: compile the Go binary (includes the embedded .o via go:embed)
-build: generate
+build: generate control/go.sum
 	mkdir -p $(OUT_DIR)
 	cd control && go build -o ../$(GTP_CTRL) .
 	@echo "Binary: $(GTP_CTRL)"
