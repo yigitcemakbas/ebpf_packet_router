@@ -132,7 +132,7 @@ with this TEID, it applies the forwarding rule you specify here.`,
 			return err
 		}
 
-		fmt.Printf("OK  teid_map[0x%08X] = %s → %s (ifindex=%d)\n",
+		fmt.Printf("OK  teid_map[0x%08X] = %s -> %s (ifindex=%d)\n",
 			teid, maps.ActionString(action), addTeidOutIface, rule.OutIfindex)
 		return nil
 	},

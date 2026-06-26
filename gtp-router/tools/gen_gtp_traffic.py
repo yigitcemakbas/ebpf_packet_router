@@ -106,8 +106,8 @@ def main():
     payload  = payload[:args.payload_len]
 
     print(f"[gtp-gen] Interface : {iface}  TEID=0x{teid:08X}")
-    print(f"          Outer IP  : {args.src_ip} → {args.dst_ip}")
-    print(f"          Inner IP  : {args.inner_src} → {args.inner_dst}")
+    print(f"          Outer IP  : {args.src_ip} -> {args.dst_ip}")
+    print(f"          Inner IP  : {args.inner_src} -> {args.inner_dst}")
     print(f"          Count={args.count}  PPS={args.pps}")
     print()
 

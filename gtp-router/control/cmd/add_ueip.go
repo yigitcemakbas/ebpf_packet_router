@@ -101,7 +101,7 @@ routing traffic to a specific UE regardless of which tunnel it arrived on.`,
 			return err
 		}
 
-		fmt.Printf("OK  ueip_map[%s] = %s → %s (ifindex=%d)\n",
+		fmt.Printf("OK  ueip_map[%s] = %s -> %s (ifindex=%d)\n",
 			ueip, maps.ActionString(action), addUeipOutIface, rule.OutIfindex)
 		return nil
 	},

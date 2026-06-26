@@ -49,7 +49,7 @@ echo " GTP-U XDP Router — End-to-End Verification"
 echo "══════════════════════════════════════════════════════"
 echo " TEID : $TEID"
 echo " Count: $COUNT packets"
-echo " Inner: $INNER_SRC → $INNER_DST"
+echo " Inner: $INNER_SRC -> $INNER_DST"
 echo
 
 echo "[ Prerequisite checks ]"
@@ -161,7 +161,7 @@ else
   # Check captured packets are IPv4 with correct addresses
   CORRECT=$(tcpdump -r "$PCAP_FILE" -nn "ip src $INNER_SRC and ip dst $INNER_DST" 2>/dev/null | wc -l)
   if [[ "$CORRECT" -gt 0 ]]; then
-    ok "Captured packets have correct inner addresses ($INNER_SRC → $INNER_DST)"
+    ok "Captured packets have correct inner addresses ($INNER_SRC -> $INNER_DST)"
   else
     fail "Captured packets do not have expected inner addresses"
   fi

@@ -49,7 +49,7 @@ if [[ ! -x "$GTP_CTRL" ]]; then
 fi
 
 echo "[setup] Kernel: $(uname -r)"
-echo "[setup] TEID: $TEID  inner: $INNER_SRC → $INNER_DST  mode: $XDP_MODE"
+echo "[setup] TEID: $TEID  inner: $INNER_SRC -> $INNER_DST  mode: $XDP_MODE"
 echo
 
 # Tear down any previous run 
@@ -125,9 +125,9 @@ echo " Test environment ready"
 echo "══════════════════════════════════════════════════════"
 echo
 echo " XDP attached to : veth-gnb1 (10.0.0.2)"
-echo " Egress interface: veth-core0 → veth-core1 (10.0.1.2)"
+echo " Egress interface: veth-core0 -> veth-core1 (10.0.1.2)"
 echo " Rule TEID       : $TEID"
-echo " Inner traffic   : $INNER_SRC → $INNER_DST"
+echo " Inner traffic   : $INNER_SRC -> $INNER_DST"
 echo
 echo " Active rules:"
 "$GTP_CTRL" list
