@@ -57,6 +57,7 @@ control/go.sum: control/go.mod control/tools.go
 # Step 2: run bpf2go — embeds the .o into Go source and generates typed structs
 $(GENERATED): $(BPF_OBJ) control/go.sum $(BPF_SRC) include/gtp_router.h
 	cd control/loader && go run github.com/cilium/ebpf/cmd/bpf2go \
+		-go-package loader \
 		-cc clang \
 		-cflags "$(BPF2GO_CFLAGS)" \
 		GtpXdp $(ROOT)/ebpf/gtp_xdp.c
