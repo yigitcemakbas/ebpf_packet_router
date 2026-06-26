@@ -1,3 +1,3 @@
 package loader
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go GtpXdp ../../ebpf/gtp_xdp.c -- -I../../include
+// bpf2go is invoked by the Makefile (make generate) with absolute kernel include paths.

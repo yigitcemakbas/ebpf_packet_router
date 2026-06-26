@@ -2,6 +2,7 @@ ARCH      := $(shell uname -m)
 # libbpf expects arm64, not aarch64 — remap for ARM64 hosts
 BPF_ARCH  := $(shell uname -m | sed 's/aarch64/arm64/')
 KERN_HDRS := /usr/include/$(ARCH)-linux-gnu
+ROOT      := $(abspath .)
 
 OUT_DIR  := build
 BPF_SRC  := ebpf/gtp_xdp.c
@@ -37,15 +38,28 @@ $(BPF_OBJ): $(BPF_SRC) include/gtp_router.h
 	clang $(BPF_CFLAGS) -c $(BPF_SRC) -o $(BPF_OBJ)
 	@echo "BPF object: $(BPF_OBJ)"
 
-# bpf2go runs from control/, so remap the include path accordingly.
-BPF2GO_CFLAGS := $(patsubst -I./include,-I../include,$(BPF_CFLAGS))
+# bpf2go may run clang from a different working directory than the Makefile,
+# so use absolute include paths (relative -I../include breaks asm/types.h lookup).
+BPF2GO_CFLAGS := \
+    -O2 -g \
+    -target bpf \
+    -D__TARGET_ARCH_$(BPF_ARCH) \
+    -I$(ROOT)/include \
+    -I$(KERN_HDRS) \
+    -Wall \
+    -Wno-unused-value \
+    -Wno-pointer-sign \
+    -Wno-compare-distinct-pointer-types
 
 control/go.sum: control/go.mod control/tools.go
 	cd control && go mod tidy
 
 # Step 2: run bpf2go — embeds the .o into Go source and generates typed structs
-$(GENERATED): $(BPF_OBJ) control/go.sum
-	cd control && BPF_CLANG=clang BPF_CFLAGS="$(BPF2GO_CFLAGS)" go generate ./loader/...
+$(GENERATED): $(BPF_OBJ) control/go.sum $(BPF_SRC) include/gtp_router.h
+	cd control/loader && go run github.com/cilium/ebpf/cmd/bpf2go \
+		-cc clang \
+		-cflags "$(BPF2GO_CFLAGS)" \
+		GtpXdp $(ROOT)/ebpf/gtp_xdp.c
 	@echo "Generated: $(GENERATED)"
 
 generate: $(GENERATED)
