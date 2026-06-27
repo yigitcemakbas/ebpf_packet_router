@@ -163,9 +163,9 @@ int xdp_gtp_router(struct xdp_md *ctx)
 		bump_stats(STAT_DROP, pkt_len);
 		return XDP_DROP;
 	case FWD_ACTION_DECAP_FWD: {
-		__u32 strip = sizeof(struct ethhdr) + ip_hdr_len
-			+ sizeof(struct udphdr) + sizeof(struct gtpuhdr)
-			+ opt_sz;
+		__u32 strip = ip_hdr_len
+			+sizeof(struct udphdr)+sizeof(struct gtpuhdr)
+			+opt_sz;
 		if (decap_gtpu(ctx, rule, strip) < 0)
 			goto drop;
 
