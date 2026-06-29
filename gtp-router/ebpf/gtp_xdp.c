@@ -76,8 +76,13 @@ static __always_inline void bump_stats(__u32 key, __u64 bytes)
 
 static __always_inline void bump_rule(struct fwd_rule *rule, __u64 bytes)
 {
-	__sync_fetch_and_add(&rule->pkt_count, 1);
-	__sync_fetch_and_add(&rule->byte_count, bytes);
+	/* Plain read-modify-write on the rule's own map-value memory. A true
+	 * atomic (__sync_fetch_and_add / BPF_ATOMIC) on a hash-map value is
+	 * unreliable on this kernel and is not needed here, so we avoid it. The
+	 * counters are best-effort and may slightly undercount under concurrent
+	 * multi-CPU traffic hitting the same rule. */
+	rule->pkt_count += 1;
+	rule->byte_count += bytes;
 }
 
 static __always_inline void rewrite_eth(struct ethhdr *eth, const struct fwd_rule *rule)

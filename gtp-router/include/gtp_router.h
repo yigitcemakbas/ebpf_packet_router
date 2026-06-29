@@ -30,9 +30,8 @@ struct fwd_rule{
 	__be32 src_ip;
 	__u16 dst_port;
 	__u8 _pad[6]; /* pad so pkt_count/byte_count land on their natural 8-byte
-	              * alignment; this layout is identical packed or unpacked, so
-	              * the atomic ops below are properly aligned (no packed-member
-	              * unaligned-atomic codegen). */
+	              * alignment and the struct is exactly 56 bytes, matching the
+	              * Go mirror in control/maps/types.go (FwdRule). */
 	__u64 pkt_count;
 	__u64 byte_count;
 };
