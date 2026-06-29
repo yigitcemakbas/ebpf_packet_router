@@ -9,6 +9,7 @@
 //   gtp-ctrl del-ueip  -> remove a UE-IP forwarding rule
 //   gtp-ctrl list      -> print all rules in both maps
 //   gtp-ctrl stats     -> print global XDP verdict counters
+//   gtp-ctrl dashboard -> live terminal dashboard of rules and verdict counters
 package cmd
 
 import (
@@ -53,5 +54,6 @@ func init() {
 		delUeipCmd,
 		listCmd,
 		statsCmd,
+		dashboardCmd,
 	)
 }
