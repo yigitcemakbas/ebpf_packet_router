@@ -15,6 +15,9 @@ var (
 	addUeipOutIface string
 	addUeipDMac     string
 	addUeipSMac     string
+	addUeipTeidOut  uint32
+	addUeipDstIP    string
+	addUeipSrcIP    string
 )
 
 var addUeipCmd = &cobra.Command{
@@ -34,7 +37,19 @@ routing traffic to a specific UE regardless of which tunnel it arrived on.`,
     --smac 11:22:33:44:55:66
 
   # Drop all GTP-U traffic to UE 10.1.0.99
-  gtp-ctrl add-ueip --ip 10.1.0.99 --action drop`,
+  gtp-ctrl add-ueip --ip 10.1.0.99 --action drop
+
+  # Encapsulate downlink traffic for UE 10.1.0.2 into a GTP-U tunnel
+  # (TEID 0xBEEF) toward gNB 10.0.0.1, sourced from 10.0.0.2
+  gtp-ctrl add-ueip \
+    --ip 10.1.0.2 \
+    --action encap \
+    --teid-out 0xBEEF \
+    --src-ip 10.0.0.2 \
+    --dst-ip 10.0.0.1 \
+    --out-iface veth-core0 \
+    --dmac aa:bb:cc:dd:ee:ff \
+    --smac 11:22:33:44:55:66`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Parse UE IP 
 		ueip := net.ParseIP(addUeipIP)
@@ -77,7 +92,29 @@ routing traffic to a specific UE regardless of which tunnel it arrived on.`,
 			}
 		}
 
-		// Validate required fields for non-drop actions 
+		// Encap (downlink) tunnel parameters: the TEID and outer IPs to put on
+		// the GTP-U envelope built around packets destined to this UE.
+		rule.TeidOut = addUeipTeidOut
+		if addUeipDstIP != "" {
+			ip := net.ParseIP(addUeipDstIP)
+			if ip == nil {
+				return fmt.Errorf("invalid --dst-ip: %s", addUeipDstIP)
+			}
+			if rule.DstIP, err = maps.IPToUint32(ip); err != nil {
+				return err
+			}
+		}
+		if addUeipSrcIP != "" {
+			ip := net.ParseIP(addUeipSrcIP)
+			if ip == nil {
+				return fmt.Errorf("invalid --src-ip: %s", addUeipSrcIP)
+			}
+			if rule.SrcIP, err = maps.IPToUint32(ip); err != nil {
+				return err
+			}
+		}
+
+		// Validate required fields for non-drop actions
 		if action != maps.ActionDrop {
 			if rule.OutIfindex == 0 {
 				return fmt.Errorf("--out-iface is required for action %s", addUeipAction)
@@ -87,6 +124,19 @@ routing traffic to a specific UE regardless of which tunnel it arrived on.`,
 			}
 			if rule.SMac == [6]byte{} {
 				return fmt.Errorf("--smac is required for action %s", addUeipAction)
+			}
+		}
+
+		// Encap needs a TEID and both outer IPs to build the tunnel header.
+		if action == maps.ActionEncapFwd {
+			if rule.TeidOut == 0 {
+				return fmt.Errorf("--teid-out is required for action encap")
+			}
+			if rule.DstIP == 0 {
+				return fmt.Errorf("--dst-ip (gNB / outer destination IP) is required for action encap")
+			}
+			if rule.SrcIP == 0 {
+				return fmt.Errorf("--src-ip (outer source IP) is required for action encap")
 			}
 		}
 
@@ -113,6 +163,9 @@ func init() {
 	addUeipCmd.Flags().StringVar(&addUeipOutIface, "out-iface", "", "Egress interface name (e.g. eth1)")
 	addUeipCmd.Flags().StringVar(&addUeipDMac, "dmac", "", "Destination MAC to write on egress")
 	addUeipCmd.Flags().StringVar(&addUeipSMac, "smac", "", "Source MAC to write on egress")
+	addUeipCmd.Flags().Uint32Var(&addUeipTeidOut, "teid-out", 0, "Outgoing GTP-U TEID for the encap tunnel (encap action)")
+	addUeipCmd.Flags().StringVar(&addUeipDstIP, "dst-ip", "", "Outer destination IP, e.g. the gNB (encap action)")
+	addUeipCmd.Flags().StringVar(&addUeipSrcIP, "src-ip", "", "Outer source IP for the encap tunnel (encap action)")
 
 	_ = addUeipCmd.MarkFlagRequired("ip")
 }

@@ -80,6 +80,26 @@ def craft_gtpu_packet(
     return pkt
 
 
+def craft_downlink_packet(
+    src_mac: str, dst_mac: str,
+    src_ip: str, ue_ip: str,
+    payload: bytes = b"\x00" * 64,
+) -> bytes:
+    """
+    A bare (un-encapsulated) IPv4 packet destined to a UE.
+
+    The router's ENCAP_FWD action (keyed by the UE IP in ueip_map) should wrap
+    this in a fresh GTP-U tunnel and forward it toward the gNB. Uses a non-2152
+    UDP port so it exercises the "IPv4, not GTP-U" branch of the XDP program.
+    """
+    return (
+        Ether(src=src_mac, dst=dst_mac)
+        / IP(src=src_ip, dst=ue_ip, ttl=64)
+        / UDP(sport=4096, dport=9999)
+        / Raw(load=payload)
+    )
+
+
 
 def main():
     ap = argparse.ArgumentParser(description="GTP-U traffic generator")
@@ -93,6 +113,10 @@ def main():
     ap.add_argument("--pps",        default=10, type=float,help="Packets per second")
     ap.add_argument("--dst-mac",    default=None,          help="Override destination MAC")
     ap.add_argument("--payload-len",default=64, type=int,  help="Inner payload bytes")
+    ap.add_argument("--mode",       default="uplink",
+                    choices=["uplink", "downlink"],
+                    help="uplink = send GTP-U (decap test); "
+                         "downlink = send bare IP to the UE (encap test)")
     args = ap.parse_args()
 
     teid = int(args.teid, 0)
@@ -105,21 +129,32 @@ def main():
     payload  = bytes(range(args.payload_len % 256)) * (args.payload_len // 256 + 1)
     payload  = payload[:args.payload_len]
 
-    print(f"[gtp-gen] Interface : {iface}  TEID=0x{teid:08X}")
-    print(f"          Outer IP  : {args.src_ip} -> {args.dst_ip}")
-    print(f"          Inner IP  : {args.inner_src} -> {args.inner_dst}")
+    if args.mode == "downlink":
+        print(f"[gtp-gen] Interface : {iface}  mode=downlink (encap test)")
+        print(f"          Bare IP   : {args.inner_src} -> {args.inner_dst} (UE)")
+    else:
+        print(f"[gtp-gen] Interface : {iface}  TEID=0x{teid:08X}")
+        print(f"          Outer IP  : {args.src_ip} -> {args.dst_ip}")
+        print(f"          Inner IP  : {args.inner_src} -> {args.inner_dst}")
     print(f"          Count={args.count}  PPS={args.pps}")
     print()
 
     sent = 0
     for i in range(args.count):
-        pkt = craft_gtpu_packet(
-            src_mac=src_mac, dst_mac=dst_mac,
-            outer_src_ip=args.src_ip, outer_dst_ip=args.dst_ip,
-            inner_src_ip=args.inner_src, inner_dst_ip=args.inner_dst,
-            teid=teid,
-            payload=payload,
-        )
+        if args.mode == "downlink":
+            pkt = craft_downlink_packet(
+                src_mac=src_mac, dst_mac=dst_mac,
+                src_ip=args.inner_src, ue_ip=args.inner_dst,
+                payload=payload,
+            )
+        else:
+            pkt = craft_gtpu_packet(
+                src_mac=src_mac, dst_mac=dst_mac,
+                outer_src_ip=args.src_ip, outer_dst_ip=args.dst_ip,
+                inner_src_ip=args.inner_src, inner_dst_ip=args.inner_dst,
+                teid=teid,
+                payload=payload,
+            )
         sendp(pkt, iface=iface, verbose=False)
         sent += 1
         if (i + 1) % 10 == 0 or (i + 1) == args.count:
