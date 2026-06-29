@@ -8,7 +8,9 @@
 package tui
 
 import (
+	"encoding/base64"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -171,6 +173,9 @@ type model struct {
 
 	updatedAt time.Time
 	err       error
+
+	statusMsg   string
+	statusUntil time.Time
 }
 
 func newModel(tm *maps.TeidMap, um *maps.UeipMap, interval time.Duration) model {
@@ -224,6 +229,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			return m.updateView(msg)
 		}
+
+	case copyResultMsg:
+		if msg.err != nil {
+			m.statusMsg = "copy failed: " + msg.err.Error()
+		} else {
+			m.statusMsg = "copied dashboard snapshot to clipboard"
+		}
+		m.statusUntil = time.Now().Add(3 * time.Second)
+		return m, nil
 
 	case tickMsg:
 		return m, tea.Batch(m.fetchCmd(), tickCmd(m.interval))
@@ -320,8 +334,51 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.confirmTarget = m.focusTarget()
 		m.confirmKey = key
 		return m, nil
+
+	case "c":
+		return m, copyCmd(m.plainSnapshot())
 	}
 	return m, nil
+}
+
+type copyResultMsg struct {
+	err error
+}
+
+// copyCmd writes the OSC 52 "set clipboard" escape sequence directly to the
+// terminal. Most modern terminal emulators (and tmux, with `set -g
+// set-clipboard on`) intercept this and copy the payload to the system
+// clipboard - including over SSH, since the clipboard belongs to the
+// terminal on the user's end, not this machine. No clipboard tool (xclip/
+// xsel/wl-clipboard) is required here as a result.
+func copyCmd(content string) tea.Cmd {
+	return func() tea.Msg {
+		encoded := base64.StdEncoding.EncodeToString([]byte(content))
+		_, err := fmt.Fprintf(os.Stdout, "\x1b]52;c;%s\x07", encoded)
+		return copyResultMsg{err: err}
+	}
+}
+
+// plainSnapshot renders the current dashboard state as plain ASCII text -
+// no lipgloss styling, so nothing pastes as garbled escape codes. Reuses
+// the exact same renderPanel/renderStats helpers the live view uses; only
+// the lipgloss border/title wrapping is skipped.
+func (m model) plainSnapshot() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "GTP-U XDP Router - Dashboard Snapshot (%s)\n\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	b.WriteString("teid_map\n")
+	b.WriteString(m.renderPanel("TEID", 12, m.teidRows, -1))
+	b.WriteString("\n")
+
+	b.WriteString("ueip_map\n")
+	b.WriteString(m.renderPanel("UE IP", 15, m.ueipRows, -1))
+	b.WriteString("\n")
+
+	b.WriteString("global verdict counters\n")
+	b.WriteString(m.renderStats())
+
+	return b.String()
 }
 
 func (m *model) focusTarget() string {
@@ -522,7 +579,10 @@ func (m model) renderView() string {
 	ueipPanel := panelStyle.Render(titleStyle.Render(ueipTitle) + "\n" + m.renderPanel("UE IP", 15, m.ueipRows, ueipSel))
 	statsPanel := panelStyle.Render(titleStyle.Render("global verdict counters") + "\n" + m.renderStats())
 
-	footer := footerStyle.Render("tab: switch panel   up/down: select   a: add   e: edit   d: delete   q: quit")
+	footer := footerStyle.Render("tab: switch panel   up/down: select   a: add   e: edit   d: delete   c: copy   q: quit")
+	if time.Now().Before(m.statusUntil) {
+		footer = footerStyle.Render(m.statusMsg) + "\n" + footer
+	}
 
 	return header + "\n\n" + teidPanel + "\n" + ueipPanel + "\n" + statsPanel + "\n\n" + footer
 }
