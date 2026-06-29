@@ -38,7 +38,7 @@ func ParseAction(s string) (uint32, error) {
 	}
 }
 
-// Mirrors struct fwd_rule in gtp_router.h (52 bytes)
+// Mirrors struct fwd_rule in gtp_router.h (56 bytes)
 type FwdRule struct {
 	Action     uint32
 	OutIfindex uint32
@@ -48,7 +48,7 @@ type FwdRule struct {
 	DstIP      uint32
 	SrcIP      uint32
 	DstPort    uint16
-	Pad        [2]byte
+	Pad        [6]byte
 	PktCount   uint64
 	ByteCount  uint64
 }

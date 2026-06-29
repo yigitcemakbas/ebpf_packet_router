@@ -74,6 +74,12 @@ static __always_inline void bump_stats(__u32 key, __u64 bytes)
 	}
 }
 
+static __always_inline void bump_rule(struct fwd_rule *rule, __u64 bytes)
+{
+	__sync_fetch_and_add(&rule->pkt_count, 1);
+	__sync_fetch_and_add(&rule->byte_count, bytes);
+}
+
 static __always_inline void rewrite_eth(struct ethhdr *eth, const struct fwd_rule *rule)
 {
 	__builtin_memcpy(eth->h_dest, rule->dmac, ETH_ALEN);
@@ -169,6 +175,7 @@ int xdp_gtp_router(struct xdp_md *ctx)
 
 	switch (rule->action) {
 	case FWD_ACTION_DROP:
+		bump_rule(rule, pkt_len);
 		bump_stats(STAT_DROP, pkt_len);
 		return XDP_DROP;
 	case FWD_ACTION_DECAP_FWD: {
@@ -179,11 +186,13 @@ int xdp_gtp_router(struct xdp_md *ctx)
 		if (decap_gtpu(ctx, eth, rule, strip) < 0)
 			goto drop;
 
+		bump_rule(rule, pkt_len);
 		bump_stats(STAT_REDIRECT, pkt_len);
 		return bpf_redirect(rule->out_ifindex, 0);
 	}
 	case FWD_ACTION_REDIRECT:
 		rewrite_eth(eth, rule);
+		bump_rule(rule, pkt_len);
 		bump_stats(STAT_REDIRECT, pkt_len);
 		return bpf_redirect(rule->out_ifindex, 0);
 	case FWD_ACTION_ENCAP_FWD:
