@@ -10,14 +10,21 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/gtp-router/control/maps"
 	"github.com/gtp-router/control/stats"
+)
+
+var (
+	teidHeaders = []string{"TEID", "ACTION", "IFINDEX", "DST MAC", "SRC MAC", "PACKETS", "BYTES", "PPS"}
+	teidWidths  = []int{12, 10, 7, 17, 17, 10, 10, 8}
+	ueipHeaders = []string{"UE IP", "ACTION", "IFINDEX", "DST MAC", "SRC MAC", "PACKETS", "BYTES", "PPS"}
+	ueipWidths  = []int{15, 10, 7, 17, 17, 10, 10, 8}
 )
 
 // asciiBorder avoids all non-ASCII box-drawing characters, matching the
@@ -79,8 +86,8 @@ type model struct {
 
 	interval time.Duration
 
-	teidTable table.Model
-	ueipTable table.Model
+	teidRows [][]string
+	ueipRows [][]string
 
 	haveData bool
 	lastTeid map[uint32]*maps.FwdRule
@@ -95,33 +102,10 @@ type model struct {
 }
 
 func newModel(tm *maps.TeidMap, um *maps.UeipMap, interval time.Duration) model {
-	teidCols := []table.Column{
-		{Title: "TEID", Width: 12},
-		{Title: "ACTION", Width: 10},
-		{Title: "IFINDEX", Width: 7},
-		{Title: "DST MAC", Width: 17},
-		{Title: "SRC MAC", Width: 17},
-		{Title: "PACKETS", Width: 10},
-		{Title: "BYTES", Width: 10},
-		{Title: "PPS", Width: 8},
-	}
-	ueipCols := []table.Column{
-		{Title: "UE IP", Width: 15},
-		{Title: "ACTION", Width: 10},
-		{Title: "IFINDEX", Width: 7},
-		{Title: "DST MAC", Width: 17},
-		{Title: "SRC MAC", Width: 17},
-		{Title: "PACKETS", Width: 10},
-		{Title: "BYTES", Width: 10},
-		{Title: "PPS", Width: 8},
-	}
-
 	return model{
-		tm:        tm,
-		um:        um,
-		interval:  interval,
-		teidTable: table.New(table.WithColumns(teidCols), table.WithHeight(8)),
-		ueipTable: table.New(table.WithColumns(ueipCols), table.WithHeight(8)),
+		tm:       tm,
+		um:       um,
+		interval: interval,
 	}
 }
 
@@ -176,8 +160,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			elapsed = msg.fetchedAt.Sub(m.lastAt).Seconds()
 		}
 
-		m.teidTable.SetRows(buildRows(msg.teid, m.lastTeid, elapsed, m.haveData, formatTEID))
-		m.ueipTable.SetRows(buildRows(msg.ueip, m.lastUeip, elapsed, m.haveData, formatUEIP))
+		m.teidRows = buildRows(msg.teid, m.lastTeid, elapsed, m.haveData, formatTEID)
+		m.ueipRows = buildRows(msg.ueip, m.lastUeip, elapsed, m.haveData, formatUEIP)
 
 		m.lastTeid = msg.teid
 		m.lastUeip = msg.ueip
@@ -204,14 +188,14 @@ func pps(curr, prev uint64, elapsed float64, havePrev bool) float64 {
 	return float64(curr-prev) / elapsed
 }
 
-func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bool, keyFmt func(uint32) string) []table.Row {
+func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bool, keyFmt func(uint32) string) [][]string {
 	keys := make([]uint32, 0, len(curr))
 	for k := range curr {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 
-	rows := make([]table.Row, 0, len(keys))
+	rows := make([][]string, 0, len(keys))
 	for _, k := range keys {
 		r := curr[k]
 		var prevPkts uint64
@@ -223,7 +207,7 @@ func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bo
 		}
 		p := pps(r.PktCount, prevPkts, elapsed, havePrevKey)
 
-		rows = append(rows, table.Row{
+		rows = append(rows, []string{
 			keyFmt(k),
 			maps.ActionString(r.Action),
 			fmt.Sprintf("%d", r.OutIfindex),
@@ -235,6 +219,39 @@ func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bo
 		})
 	}
 	return rows
+}
+
+// renderTable formats headers and rows as fixed-width, left-justified plain
+// text, the same approach already used by `gtp-ctrl list` (tabwriter) and
+// the global verdict panel below - no external table widget involved.
+func renderTable(headers []string, widths []int, rows [][]string) string {
+	var b strings.Builder
+
+	writeRow := func(cells []string) {
+		for i, w := range widths {
+			cell := ""
+			if i < len(cells) {
+				cell = cells[i]
+			}
+			fmt.Fprintf(&b, "%-*s  ", w, cell)
+		}
+		b.WriteString("\n")
+	}
+
+	writeRow(headers)
+	seps := make([]string, len(widths))
+	for i, w := range widths {
+		seps[i] = strings.Repeat("-", w)
+	}
+	writeRow(seps)
+
+	if len(rows) == 0 {
+		b.WriteString("(empty)\n")
+	}
+	for _, r := range rows {
+		writeRow(r)
+	}
+	return b.String()
 }
 
 func (m model) View() string {
@@ -251,8 +268,8 @@ func (m model) View() string {
 		header += "   (loading...)"
 	}
 
-	teidPanel := panelStyle.Render(titleStyle.Render("teid_map") + "\n" + m.teidTable.View())
-	ueipPanel := panelStyle.Render(titleStyle.Render("ueip_map") + "\n" + m.ueipTable.View())
+	teidPanel := panelStyle.Render(titleStyle.Render("teid_map") + "\n" + renderTable(teidHeaders, teidWidths, m.teidRows))
+	ueipPanel := panelStyle.Render(titleStyle.Render("ueip_map") + "\n" + renderTable(ueipHeaders, ueipWidths, m.ueipRows))
 	statsPanel := panelStyle.Render(titleStyle.Render("global verdict counters") + "\n" + m.renderStats())
 
 	footer := footerStyle.Render("q: quit   ctrl+c: quit")
