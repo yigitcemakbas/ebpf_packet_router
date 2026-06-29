@@ -108,17 +108,9 @@ with this TEID, it applies the forwarding rule you specify here.`,
 			rule.DstPort = binary.LittleEndian.Uint16(b)
 		}
 
-		// Validate required fields for non-drop actions 
-		if action != maps.ActionDrop {
-			if rule.OutIfindex == 0 {
-				return fmt.Errorf("--out-iface is required for action %s", addTeidAction)
-			}
-			if rule.DMac == [6]byte{} {
-				return fmt.Errorf("--dmac is required for action %s", addTeidAction)
-			}
-			if rule.SMac == [6]byte{} {
-				return fmt.Errorf("--smac is required for action %s", addTeidAction)
-			}
+		// Validate required fields for the chosen action.
+		if err := maps.ValidateRule(rule); err != nil {
+			return err
 		}
 
 		// Write to map 

@@ -114,30 +114,9 @@ routing traffic to a specific UE regardless of which tunnel it arrived on.`,
 			}
 		}
 
-		// Validate required fields for non-drop actions
-		if action != maps.ActionDrop {
-			if rule.OutIfindex == 0 {
-				return fmt.Errorf("--out-iface is required for action %s", addUeipAction)
-			}
-			if rule.DMac == [6]byte{} {
-				return fmt.Errorf("--dmac is required for action %s", addUeipAction)
-			}
-			if rule.SMac == [6]byte{} {
-				return fmt.Errorf("--smac is required for action %s", addUeipAction)
-			}
-		}
-
-		// Encap needs a TEID and both outer IPs to build the tunnel header.
-		if action == maps.ActionEncapFwd {
-			if rule.TeidOut == 0 {
-				return fmt.Errorf("--teid-out is required for action encap")
-			}
-			if rule.DstIP == 0 {
-				return fmt.Errorf("--dst-ip (gNB / outer destination IP) is required for action encap")
-			}
-			if rule.SrcIP == 0 {
-				return fmt.Errorf("--src-ip (outer source IP) is required for action encap")
-			}
+		// Validate required fields for the chosen action.
+		if err := maps.ValidateRule(rule); err != nil {
+			return err
 		}
 
 		// Write to map

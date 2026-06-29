@@ -20,12 +20,54 @@ import (
 	"github.com/gtp-router/control/stats"
 )
 
-var (
-	teidHeaders = []string{"TEID", "ACTION", "IFINDEX", "DST MAC", "SRC MAC", "PACKETS", "BYTES", "PPS"}
-	teidWidths  = []int{12, 10, 7, 17, 17, 10, 10, 8}
-	ueipHeaders = []string{"UE IP", "ACTION", "IFINDEX", "DST MAC", "SRC MAC", "PACKETS", "BYTES", "PPS"}
-	ueipWidths  = []int{15, 10, 7, 17, 17, 10, 10, 8}
+// defaultWidth is assumed until the first tea.WindowSizeMsg arrives, so the
+// dashboard doesn't flash a "too narrow" notice for one frame on startup.
+const defaultWidth = 80
+
+// Width tiers for the rule panels. Columns deliberately omit DST MAC/SRC MAC
+// (static config already shown in full by `gtp-ctrl list`) even at full
+// width - the dashboard's job is the live counters, not re-displaying
+// config. BYTES is the next to go as space gets tighter, since PACKETS and
+// PPS already convey volume/rate.
+const (
+	fullWidthThreshold   = 80
+	mediumWidthThreshold = 60
 )
+
+// columnsFor returns the headers/widths for a rule panel's key column (TEID
+// or UE IP) at the given terminal width. tooNarrow is true when there isn't
+// enough room for any table layout, in which case the caller should show a
+// plain notice instead of attempting to render columns.
+func columnsFor(width int, keyLabel string, keyWidth int) (headers []string, widths []int, tooNarrow bool) {
+	switch {
+	case width >= fullWidthThreshold:
+		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "BYTES", "PPS"},
+			[]int{keyWidth, 10, 7, 10, 10, 8}, false
+	case width >= mediumWidthThreshold:
+		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "PPS"},
+			[]int{keyWidth, 10, 7, 10, 8}, false
+	default:
+		return nil, nil, true
+	}
+}
+
+// dropColumn removes column idx from every row, used when a narrower layout
+// drops BYTES (index 4 in the full row produced by buildRows) without
+// needing buildRows itself to know about rendering width.
+func dropColumn(rows [][]string, idx int) [][]string {
+	out := make([][]string, len(rows))
+	for i, r := range rows {
+		nr := make([]string, 0, len(r))
+		for j, c := range r {
+			if j == idx {
+				continue
+			}
+			nr = append(nr, c)
+		}
+		out[i] = nr
+	}
+	return out
+}
 
 // asciiBorder avoids all non-ASCII box-drawing characters, matching the
 // project's ASCII-only output policy (see the "Removed non-ASCII characters"
@@ -70,6 +112,24 @@ func Run(interval time.Duration) error {
 	return err
 }
 
+// mode selects which of the three sub-views Update/View dispatch to.
+type uiMode int
+
+const (
+	modeView uiMode = iota
+	modeForm
+	modeConfirmDelete
+)
+
+// panelFocus selects which rule panel keyboard navigation (Tab/Up/Down/
+// a/e/d) currently applies to.
+type panelFocus int
+
+const (
+	focusTeid panelFocus = iota
+	focusUeip
+)
+
 type tickMsg time.Time
 
 type dataMsg struct {
@@ -85,9 +145,21 @@ type model struct {
 	um *maps.UeipMap
 
 	interval time.Duration
+	width    int
 
-	teidRows [][]string
-	ueipRows [][]string
+	mode  uiMode
+	focus panelFocus
+
+	teidRows     [][]string
+	ueipRows     [][]string
+	teidKeys     []uint32
+	ueipKeys     []uint32
+	teidSelected int
+	ueipSelected int
+
+	form          *formModel
+	confirmTarget string
+	confirmKey    uint32
 
 	haveData bool
 	lastTeid map[uint32]*maps.FwdRule
@@ -106,6 +178,7 @@ func newModel(tm *maps.TeidMap, um *maps.UeipMap, interval time.Duration) model 
 		tm:       tm,
 		um:       um,
 		interval: interval,
+		width:    defaultWidth,
 	}
 }
 
@@ -138,12 +211,19 @@ func tickCmd(interval time.Duration) tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		return m, nil
+
+	case tea.KeyMsg:
+		switch m.mode {
+		case modeForm:
+			return m.updateForm(msg)
+		case modeConfirmDelete:
+			return m.updateConfirmDelete(msg)
+		default:
+			return m.updateView(msg)
+		}
 
 	case tickMsg:
 		return m, tea.Batch(m.fetchCmd(), tickCmd(m.interval))
@@ -160,8 +240,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			elapsed = msg.fetchedAt.Sub(m.lastAt).Seconds()
 		}
 
-		m.teidRows = buildRows(msg.teid, m.lastTeid, elapsed, m.haveData, formatTEID)
-		m.ueipRows = buildRows(msg.ueip, m.lastUeip, elapsed, m.haveData, formatUEIP)
+		m.teidKeys, m.teidRows = buildRows(msg.teid, m.lastTeid, elapsed, m.haveData, formatTEID)
+		m.ueipKeys, m.ueipRows = buildRows(msg.ueip, m.lastUeip, elapsed, m.haveData, formatUEIP)
+		m.teidSelected = clamp(m.teidSelected, 0, max(len(m.teidKeys)-1, 0))
+		m.ueipSelected = clamp(m.ueipSelected, 0, max(len(m.ueipKeys)-1, 0))
 
 		m.lastTeid = msg.teid
 		m.lastUeip = msg.ueip
@@ -181,6 +263,143 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func formatTEID(key uint32) string { return fmt.Sprintf("0x%08X", key) }
 func formatUEIP(key uint32) string { return maps.Uint32ToIP(key).String() }
 
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// updateView handles key input while the live dashboard (not a form or
+// delete confirmation) is shown: panel focus, row selection, and opening the
+// add/edit/delete sub-views.
+func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+
+	case "tab":
+		if m.focus == focusTeid {
+			m.focus = focusUeip
+		} else {
+			m.focus = focusTeid
+		}
+		return m, nil
+
+	case "up", "k":
+		m.moveSelection(-1)
+		return m, nil
+
+	case "down", "j":
+		m.moveSelection(1)
+		return m, nil
+
+	case "a":
+		m.mode = modeForm
+		m.form = newAddForm(m.focusTarget())
+		return m, nil
+
+	case "e", "enter":
+		key, rule, ok := m.selectedRule()
+		if !ok {
+			return m, nil
+		}
+		m.mode = modeForm
+		m.form = newEditForm(m.focusTarget(), key, rule)
+		return m, nil
+
+	case "d", "x":
+		key, _, ok := m.selectedRule()
+		if !ok {
+			return m, nil
+		}
+		m.mode = modeConfirmDelete
+		m.confirmTarget = m.focusTarget()
+		m.confirmKey = key
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *model) focusTarget() string {
+	if m.focus == focusTeid {
+		return "teid"
+	}
+	return "ueip"
+}
+
+func (m *model) moveSelection(delta int) {
+	if m.focus == focusTeid {
+		n := len(m.teidKeys)
+		if n == 0 {
+			return
+		}
+		m.teidSelected = clamp(m.teidSelected+delta, 0, n-1)
+		return
+	}
+	n := len(m.ueipKeys)
+	if n == 0 {
+		return
+	}
+	m.ueipSelected = clamp(m.ueipSelected+delta, 0, n-1)
+}
+
+// selectedRule returns the map key and current rule for whichever panel has
+// focus, reading from the last fetched snapshot (lastTeid/lastUeip) rather
+// than the rendered string rows, so an edit form can be pre-filled with the
+// real field values.
+func (m *model) selectedRule() (uint32, *maps.FwdRule, bool) {
+	if m.focus == focusTeid {
+		if m.teidSelected < 0 || m.teidSelected >= len(m.teidKeys) {
+			return 0, nil, false
+		}
+		key := m.teidKeys[m.teidSelected]
+		return key, m.lastTeid[key], true
+	}
+	if m.ueipSelected < 0 || m.ueipSelected >= len(m.ueipKeys) {
+		return 0, nil, false
+	}
+	key := m.ueipKeys[m.ueipSelected]
+	return key, m.lastUeip[key], true
+}
+
+// updateConfirmDelete handles the y/n delete-confirmation prompt.
+func (m model) updateConfirmDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "enter":
+		var err error
+		if m.confirmTarget == "teid" {
+			err = m.tm.Delete(m.confirmKey)
+		} else {
+			err = m.um.Delete(maps.Uint32ToIP(m.confirmKey))
+		}
+		m.mode = modeView
+		if err != nil {
+			m.err = err
+			return m, nil
+		}
+		return m, m.fetchCmd()
+
+	case "n", "esc":
+		m.mode = modeView
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) renderConfirm() string {
+	label := fmt.Sprintf("0x%08X", m.confirmKey)
+	if m.confirmTarget == "ueip" {
+		label = maps.Uint32ToIP(m.confirmKey).String()
+	}
+	body := fmt.Sprintf("Delete %s rule for %s ?\n\n", m.confirmTarget, label) +
+		footerStyle.Render("y: confirm   n/esc: cancel")
+	return panelStyle.Render(titleStyle.Render("Confirm delete") + "\n\n" + body)
+}
+
 func pps(curr, prev uint64, elapsed float64, havePrev bool) float64 {
 	if !havePrev || elapsed <= 0 || curr < prev {
 		return 0
@@ -188,7 +407,10 @@ func pps(curr, prev uint64, elapsed float64, havePrev bool) float64 {
 	return float64(curr-prev) / elapsed
 }
 
-func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bool, keyFmt func(uint32) string) [][]string {
+// buildRows returns the sorted keys alongside their rendered rows, in the
+// same order, so a selection index can be mapped back to a real map key
+// (and from there to the underlying *maps.FwdRule for edit/delete).
+func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bool, keyFmt func(uint32) string) ([]uint32, [][]string) {
 	keys := make([]uint32, 0, len(curr))
 	for k := range curr {
 		keys = append(keys, k)
@@ -211,23 +433,26 @@ func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bo
 			keyFmt(k),
 			maps.ActionString(r.Action),
 			fmt.Sprintf("%d", r.OutIfindex),
-			maps.MACString(r.DMac),
-			maps.MACString(r.SMac),
 			fmt.Sprintf("%d", r.PktCount),
 			maps.FormatBytes(r.ByteCount),
 			fmt.Sprintf("%.1f/s", p),
 		})
 	}
-	return rows
+	return keys, rows
 }
 
 // renderTable formats headers and rows as fixed-width, left-justified plain
 // text, the same approach already used by `gtp-ctrl list` (tabwriter) and
-// the global verdict panel below - no external table widget involved.
-func renderTable(headers []string, widths []int, rows [][]string) string {
+// the global verdict panel below - no external table widget involved. The
+// selected row (if any, -1 for none) gets a plain ASCII "> " marker instead
+// of a styling/color approach, since mixing ANSI styling into fixed-width
+// Sprintf padding is exactly the kind of thing that caused the earlier
+// bubbles/table rendering bug - a plain marker column can't misalign.
+func renderTable(headers []string, widths []int, rows [][]string, selected int) string {
 	var b strings.Builder
 
-	writeRow := func(cells []string) {
+	writeRow := func(marker string, cells []string) {
+		b.WriteString(marker)
 		for i, w := range widths {
 			cell := ""
 			if i < len(cells) {
@@ -238,18 +463,22 @@ func renderTable(headers []string, widths []int, rows [][]string) string {
 		b.WriteString("\n")
 	}
 
-	writeRow(headers)
+	writeRow("  ", headers)
 	seps := make([]string, len(widths))
 	for i, w := range widths {
 		seps[i] = strings.Repeat("-", w)
 	}
-	writeRow(seps)
+	writeRow("  ", seps)
 
 	if len(rows) == 0 {
-		b.WriteString("(empty)\n")
+		b.WriteString("  (empty)\n")
 	}
-	for _, r := range rows {
-		writeRow(r)
+	for i, r := range rows {
+		marker := "  "
+		if i == selected {
+			marker = "> "
+		}
+		writeRow(marker, r)
 	}
 	return b.String()
 }
@@ -261,6 +490,17 @@ func (m model) View() string {
 			footerStyle.Render("q: quit   ctrl+c: quit")
 	}
 
+	switch m.mode {
+	case modeForm:
+		return m.renderForm()
+	case modeConfirmDelete:
+		return m.renderConfirm()
+	default:
+		return m.renderView()
+	}
+}
+
+func (m model) renderView() string {
 	header := titleStyle.Render("GTP-U XDP Router - Live Dashboard")
 	if !m.updatedAt.IsZero() {
 		header += fmt.Sprintf("   (refresh: %s, updated: %s)", m.interval, m.updatedAt.Format("15:04:05"))
@@ -268,13 +508,37 @@ func (m model) View() string {
 		header += "   (loading...)"
 	}
 
-	teidPanel := panelStyle.Render(titleStyle.Render("teid_map") + "\n" + renderTable(teidHeaders, teidWidths, m.teidRows))
-	ueipPanel := panelStyle.Render(titleStyle.Render("ueip_map") + "\n" + renderTable(ueipHeaders, ueipWidths, m.ueipRows))
+	teidTitle, ueipTitle := "  teid_map", "  ueip_map"
+	teidSel, ueipSel := -1, -1
+	if m.focus == focusTeid {
+		teidTitle = "> teid_map"
+		teidSel = m.teidSelected
+	} else {
+		ueipTitle = "> ueip_map"
+		ueipSel = m.ueipSelected
+	}
+
+	teidPanel := panelStyle.Render(titleStyle.Render(teidTitle) + "\n" + m.renderPanel("TEID", 12, m.teidRows, teidSel))
+	ueipPanel := panelStyle.Render(titleStyle.Render(ueipTitle) + "\n" + m.renderPanel("UE IP", 15, m.ueipRows, ueipSel))
 	statsPanel := panelStyle.Render(titleStyle.Render("global verdict counters") + "\n" + m.renderStats())
 
-	footer := footerStyle.Render("q: quit   ctrl+c: quit")
+	footer := footerStyle.Render("tab: switch panel   up/down: select   a: add   e: edit   d: delete   q: quit")
 
 	return header + "\n\n" + teidPanel + "\n" + ueipPanel + "\n" + statsPanel + "\n\n" + footer
+}
+
+// renderPanel picks the column set for the current terminal width and
+// renders the corresponding rows, dropping BYTES from the full 6-column row
+// produced by buildRows when the medium-width tier is in effect.
+func (m model) renderPanel(keyLabel string, keyWidth int, rows [][]string, selected int) string {
+	headers, widths, tooNarrow := columnsFor(m.width, keyLabel, keyWidth)
+	if tooNarrow {
+		return "(terminal too narrow for table view - resize to at least 60 columns)"
+	}
+	if len(headers) == 5 {
+		rows = dropColumn(rows, 4) // full row is [key, action, ifindex, packets, bytes, pps]; drop bytes
+	}
+	return renderTable(headers, widths, rows, selected)
 }
 
 func (m model) renderStats() string {
