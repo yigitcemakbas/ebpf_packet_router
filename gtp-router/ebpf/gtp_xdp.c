@@ -80,26 +80,29 @@ static __always_inline void rewrite_eth(struct ethhdr *eth, const struct fwd_rul
 	__builtin_memcpy(eth->h_source, rule->smac, ETH_ALEN);
 }
 
-static __always_inline int decap_gtpu(struct xdp_md *ctx, struct ethhdr *eth,
+static __always_inline int decap_gtpu(struct xdp_md *ctx,
 				      const struct fwd_rule *rule, __u32 strip_bytes)
 {
-	/* Rewrite the existing L2 header in place, then strip only the GTP
-	 * tunnel (outer IP + UDP + GTP-U). Do NOT include sizeof(ethhdr) in
-	 * strip_bytes — that would move the packet start to the inner IP and
-	 * overwrite its first bytes when we rewrite the MAC addresses. */
-	rewrite_eth(eth, rule);
-	eth->h_proto = bpf_htons(ETH_P_IP);
-
+	/* strip_bytes = outer IP + UDP + GTP (not outer Ethernet, 14 B).
+	 * After advancing ctx->data by strip_bytes the layout becomes:
+	 *   new offset  0-13 : old UDP/GTP tail bytes — will be overwritten
+	 *   new offset 14+   : inner IP (correct position after Ethernet)
+	 * Write the new Ethernet header at the new ctx->data. */
 	if (bpf_xdp_adjust_head(ctx, (int)strip_bytes))
 		return -1;
 
 	void *data = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
 
-	if ((void *)((struct ethhdr *)data + 1) > data_end)
+	struct ethhdr *new_eth = (struct ethhdr *)data;
+	if ((void *)(new_eth + 1) > data_end)
 		return -1;
 
-	struct iphdr *inner = (void *)((struct ethhdr *)data + 1);
+	__builtin_memcpy(new_eth->h_dest, rule->dmac, ETH_ALEN);
+	__builtin_memcpy(new_eth->h_source, rule->smac, ETH_ALEN);
+	new_eth->h_proto = bpf_htons(ETH_P_IP);
+
+	struct iphdr *inner = (struct iphdr *)(new_eth + 1);
 	if ((void *)(inner + 1) > data_end || inner->version != 4)
 		return -1;
 
@@ -176,7 +179,7 @@ int xdp_gtp_router(struct xdp_md *ctx)
 		__u32 strip = ip_hdr_len + sizeof(struct udphdr)
 			+ sizeof(struct gtpuhdr) + opt_sz;
 
-		if (decap_gtpu(ctx, eth, rule, strip) < 0)
+		if (decap_gtpu(ctx, rule, strip) < 0)
 			goto drop;
 
 		bump_stats(STAT_REDIRECT, pkt_len);

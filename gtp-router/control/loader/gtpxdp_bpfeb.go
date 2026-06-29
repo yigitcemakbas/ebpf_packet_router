@@ -21,7 +21,7 @@ type GtpXdpFwdRule struct {
 	DstIp      uint32
 	SrcIp      uint32
 	DstPort    uint16
-	Pad        [2]uint8
+	Pad        [6]uint8
 	PktCount   uint64
 	ByteCount  uint64
 }
