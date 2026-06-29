@@ -80,20 +80,29 @@ static __always_inline void rewrite_eth(struct ethhdr *eth, const struct fwd_rul
 	__builtin_memcpy(eth->h_source, rule->smac, ETH_ALEN);
 }
 
-static __always_inline int decap_gtpu(struct xdp_md *ctx, const struct fwd_rule *rule, __u32 strip_bytes)
+static __always_inline int decap_gtpu(struct xdp_md *ctx, struct ethhdr *eth,
+				      const struct fwd_rule *rule, __u32 strip_bytes)
 {
+	/* Rewrite the existing L2 header in place, then strip only the GTP
+	 * tunnel (outer IP + UDP + GTP-U). Do NOT include sizeof(ethhdr) in
+	 * strip_bytes — that would move the packet start to the inner IP and
+	 * overwrite its first bytes when we rewrite the MAC addresses. */
+	rewrite_eth(eth, rule);
+	eth->h_proto = bpf_htons(ETH_P_IP);
+
 	if (bpf_xdp_adjust_head(ctx, (int)strip_bytes))
 		return -1;
 
 	void *data = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
 
-	struct ethhdr *new_eth = data;
-	if ((void *)(new_eth + 1) > data_end)
+	if ((void *)((struct ethhdr *)data + 1) > data_end)
 		return -1;
 
-	rewrite_eth(new_eth, rule);
-	new_eth->h_proto = bpf_htons(ETH_P_IP);
+	struct iphdr *inner = (void *)((struct ethhdr *)data + 1);
+	if ((void *)(inner + 1) > data_end || inner->version != 4)
+		return -1;
+
 	return 0;
 }
 
@@ -163,17 +172,11 @@ int xdp_gtp_router(struct xdp_md *ctx)
 		bump_stats(STAT_DROP, pkt_len);
 		return XDP_DROP;
 	case FWD_ACTION_DECAP_FWD: {
-		__u32 strip = ip_hdr_len
-			+sizeof(struct udphdr)+sizeof(struct gtpuhdr)
-			+opt_sz;
-		if (decap_gtpu(ctx, rule, strip) < 0)
-			goto drop;
+		/* Strip tunnel headers only — outer Ethernet stays at ctx->data. */
+		__u32 strip = ip_hdr_len + sizeof(struct udphdr)
+			+ sizeof(struct gtpuhdr) + opt_sz;
 
-		void *d = (void *)(long)ctx->data;
-		void *d_end = (void *)(long)ctx->data_end;
-
-		struct ethhdr *new_eth = d;
-		if ((void *)(new_eth + 1) > d_end)
+		if (decap_gtpu(ctx, eth, rule, strip) < 0)
 			goto drop;
 
 		bump_stats(STAT_REDIRECT, pkt_len);

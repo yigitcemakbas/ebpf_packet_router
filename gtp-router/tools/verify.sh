@@ -75,7 +75,12 @@ else
   exit 1
 fi
 
-if "$GTP_CTRL" list 2>/dev/null | grep -q "DECAP_FWD"; then
+# Capture into a variable first: piping straight into `grep -q` lets grep exit
+# on the first match and close the pipe early, which makes gtp-ctrl die with
+# SIGPIPE (exit 141). Under `pipefail` that 141 becomes the pipeline status and
+# the check spuriously fails even though the rule is present.
+RULES_LIST=$("$GTP_CTRL" list 2>/dev/null)
+if echo "$RULES_LIST" | grep -q "DECAP_FWD"; then
   ok "DECAP_FWD rule is present in teid_map"
 else
   fail "No DECAP_FWD rule found. Run setup_netns.sh first"
