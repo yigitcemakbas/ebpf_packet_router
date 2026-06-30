@@ -62,7 +62,7 @@ func watchStats() error {
 			}
 			// Move cursor to top-left and overwrite.
 			fmt.Print("\033[H")
-			fmt.Printf("GTP-U XDP Router — stats  (Ctrl-C to stop)\n\n")
+			fmt.Printf("GTP-U XDP Router - stats  (Ctrl-C to stop)\n\n")
 			printCounters(c)
 		}
 	}

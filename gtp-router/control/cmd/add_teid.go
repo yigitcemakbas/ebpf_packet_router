@@ -11,15 +11,18 @@ import (
 )
 
 var (
-	addTeidTeid     string
-	addTeidAction   string
-	addTeidOutIface string
-	addTeidDMac     string
-	addTeidSMac     string
-	addTeidDstIP    string
-	addTeidSrcIP    string
-	addTeidTeidOut  uint32
-	addTeidDstPort  uint16
+	addTeidTeid                string
+	addTeidAction              string
+	addTeidOutIface            string
+	addTeidDMac                string
+	addTeidSMac                string
+	addTeidDstIP               string
+	addTeidSrcIP               string
+	addTeidTeidOut             uint32
+	addTeidDstPort             uint16
+	addTeidRatePPS             uint32
+	addTeidQuarantineThreshold uint32
+	addTeidQuarantineSeconds   uint32
 )
 
 var addTeidCmd = &cobra.Command{
@@ -39,7 +42,28 @@ with this TEID, it applies the forwarding rule you specify here.`,
     --smac 11:22:33:44:55:66
 
   # Drop all traffic arriving on TEID 0x1234
-  gtp-ctrl add-teid --teid 0x1234 --action drop`,
+  gtp-ctrl add-teid --teid 0x1234 --action drop
+
+  # Same as above, but cap this subscriber's tunnel to 100 packets/sec
+  gtp-ctrl add-teid \
+    --teid 0xDEAD \
+    --action decap \
+    --out-iface eth1 \
+    --dmac aa:bb:cc:dd:ee:ff \
+    --smac 11:22:33:44:55:66 \
+    --rate-pps 100
+
+  # Same, but after 3 consecutive seconds of exceeding the cap, autonomously
+  # quarantine (hard-block) this subscriber for 30 seconds, no human involved
+  gtp-ctrl add-teid \
+    --teid 0xDEAD \
+    --action decap \
+    --out-iface eth1 \
+    --dmac aa:bb:cc:dd:ee:ff \
+    --smac 11:22:33:44:55:66 \
+    --rate-pps 100 \
+    --quarantine-threshold 3 \
+    --quarantine-seconds 30`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		teid, err := parseTEID(addTeidTeid)
 		if err != nil {
@@ -51,10 +75,13 @@ with this TEID, it applies the forwarding rule you specify here.`,
 			return err
 		}
 
-		// Build rule 
+		// Build rule
 		rule := &maps.FwdRule{
-			Action:  action,
-			TeidOut: addTeidTeidOut,
+			Action:              action,
+			TeidOut:             addTeidTeidOut,
+			RatePPS:             addTeidRatePPS,
+			QuarantineThreshold: addTeidQuarantineThreshold,
+			QuarantineSeconds:   addTeidQuarantineSeconds,
 		}
 
 		// Resolve egress interface index.
@@ -108,17 +135,9 @@ with this TEID, it applies the forwarding rule you specify here.`,
 			rule.DstPort = binary.LittleEndian.Uint16(b)
 		}
 
-		// Validate required fields for non-drop actions 
-		if action != maps.ActionDrop {
-			if rule.OutIfindex == 0 {
-				return fmt.Errorf("--out-iface is required for action %s", addTeidAction)
-			}
-			if rule.DMac == [6]byte{} {
-				return fmt.Errorf("--dmac is required for action %s", addTeidAction)
-			}
-			if rule.SMac == [6]byte{} {
-				return fmt.Errorf("--smac is required for action %s", addTeidAction)
-			}
+		// Validate required fields for the chosen action.
+		if err := maps.ValidateRule(rule); err != nil {
+			return err
 		}
 
 		// Write to map 
@@ -148,6 +167,9 @@ func init() {
 	addTeidCmd.Flags().StringVar(&addTeidSrcIP, "src-ip", "", "Outer source IP (encap path)")
 	addTeidCmd.Flags().Uint32Var(&addTeidTeidOut, "teid-out", 0, "Outgoing TEID (encap path)")
 	addTeidCmd.Flags().Uint16Var(&addTeidDstPort, "dst-port", 2152, "Outer UDP destination port (encap path)")
+	addTeidCmd.Flags().Uint32Var(&addTeidRatePPS, "rate-pps", 0, "Cap this rule to N packets/sec, dropping the rest (0 = unlimited)")
+	addTeidCmd.Flags().Uint32Var(&addTeidQuarantineThreshold, "quarantine-threshold", 0, "Consecutive rate-limit violations before auto-quarantine (0 = disabled)")
+	addTeidCmd.Flags().Uint32Var(&addTeidQuarantineSeconds, "quarantine-seconds", 0, "How long an auto-quarantine lasts (required if --quarantine-threshold is set)")
 
 	_ = addTeidCmd.MarkFlagRequired("teid")
 }

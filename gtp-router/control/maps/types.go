@@ -38,7 +38,7 @@ func ParseAction(s string) (uint32, error) {
 	}
 }
 
-// Mirrors struct fwd_rule in gtp_router.h (52 bytes)
+// Mirrors struct fwd_rule in gtp_router.h (104 bytes)
 type FwdRule struct {
 	Action     uint32
 	OutIfindex uint32
@@ -48,9 +48,26 @@ type FwdRule struct {
 	DstIP      uint32
 	SrcIP      uint32
 	DstPort    uint16
-	Pad        [2]byte
+	Pad        [6]byte
 	PktCount   uint64
 	ByteCount  uint64
+
+	// Per-rule rate limiting (see ebpf/gtp_xdp.c's enforce_policy()).
+	// RatePPS=0 means unlimited.
+	RatePPS       uint32
+	WindowCount   uint32
+	WindowStartNs uint64
+	RateDropCount uint64
+
+	// Autonomous quarantine: QuarantineThreshold=0 disables it (default).
+	// QuarantineUntilNs is a bpf_ktime_get_ns() (CLOCK_MONOTONIC) deadline,
+	// not wall-clock time - compare against unix.ClockGettime(CLOCK_MONOTONIC),
+	// not time.Now().
+	ViolationStreak     uint32
+	QuarantineThreshold uint32
+	QuarantineSeconds   uint32
+	WindowViolated      uint32
+	QuarantineUntilNs   uint64
 }
 
 func IPToUint32(ip net.IP) (uint32, error) {
@@ -93,11 +110,15 @@ func MACString(mac [6]byte) string {
 		mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 }
 
+// FormatBytes never includes a space: this is consumed by `gtp-ctrl list`,
+// which the verify_*.sh scripts awk-column-parse, and a space here silently
+// shifts the field position of every column after it (this exact bug has
+// broken tools/verify_ratelimit.sh twice already).
 func FormatBytes(b uint64) string {
 	switch {
-	case b >= 1<<30: return fmt.Sprintf("%.2f GB", float64(b)/float64(1<<30))
-	case b >= 1<<20: return fmt.Sprintf("%.2f MB", float64(b)/float64(1<<20))
-	case b >= 1<<10: return fmt.Sprintf("%.2f KB", float64(b)/float64(1<<10))
-	default:         return fmt.Sprintf("%d B", b)
+	case b >= 1<<30: return fmt.Sprintf("%.2fGB", float64(b)/float64(1<<30))
+	case b >= 1<<20: return fmt.Sprintf("%.2fMB", float64(b)/float64(1<<20))
+	case b >= 1<<10: return fmt.Sprintf("%.2fKB", float64(b)/float64(1<<10))
+	default:         return fmt.Sprintf("%dB", b)
 	}
 }
