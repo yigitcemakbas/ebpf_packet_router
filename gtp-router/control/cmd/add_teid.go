@@ -20,6 +20,7 @@ var (
 	addTeidSrcIP    string
 	addTeidTeidOut  uint32
 	addTeidDstPort  uint16
+	addTeidRatePPS  uint32
 )
 
 var addTeidCmd = &cobra.Command{
@@ -39,7 +40,16 @@ with this TEID, it applies the forwarding rule you specify here.`,
     --smac 11:22:33:44:55:66
 
   # Drop all traffic arriving on TEID 0x1234
-  gtp-ctrl add-teid --teid 0x1234 --action drop`,
+  gtp-ctrl add-teid --teid 0x1234 --action drop
+
+  # Same as above, but cap this subscriber's tunnel to 100 packets/sec
+  gtp-ctrl add-teid \
+    --teid 0xDEAD \
+    --action decap \
+    --out-iface eth1 \
+    --dmac aa:bb:cc:dd:ee:ff \
+    --smac 11:22:33:44:55:66 \
+    --rate-pps 100`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		teid, err := parseTEID(addTeidTeid)
 		if err != nil {
@@ -51,10 +61,11 @@ with this TEID, it applies the forwarding rule you specify here.`,
 			return err
 		}
 
-		// Build rule 
+		// Build rule
 		rule := &maps.FwdRule{
 			Action:  action,
 			TeidOut: addTeidTeidOut,
+			RatePPS: addTeidRatePPS,
 		}
 
 		// Resolve egress interface index.
@@ -140,6 +151,7 @@ func init() {
 	addTeidCmd.Flags().StringVar(&addTeidSrcIP, "src-ip", "", "Outer source IP (encap path)")
 	addTeidCmd.Flags().Uint32Var(&addTeidTeidOut, "teid-out", 0, "Outgoing TEID (encap path)")
 	addTeidCmd.Flags().Uint16Var(&addTeidDstPort, "dst-port", 2152, "Outer UDP destination port (encap path)")
+	addTeidCmd.Flags().Uint32Var(&addTeidRatePPS, "rate-pps", 0, "Cap this rule to N packets/sec, dropping the rest (0 = unlimited)")
 
 	_ = addTeidCmd.MarkFlagRequired("teid")
 }

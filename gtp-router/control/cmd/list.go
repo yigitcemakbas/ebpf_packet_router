@@ -32,8 +32,8 @@ var listCmd = &cobra.Command{
 
 		fmt.Fprintf(w, "=== teid_map (%d entries) ===\n", len(teidEntries))
 		if len(teidEntries) > 0 {
-			fmt.Fprintln(w, "TEID\tACTION\tIFINDEX\tDST MAC\tSRC MAC\tPACKETS\tBYTES")
-			fmt.Fprintln(w, "----\t------\t-------\t-------\t-------\t-------\t-----")
+			fmt.Fprintln(w, "TEID\tACTION\tIFINDEX\tDST MAC\tSRC MAC\tPACKETS\tBYTES\tRATE-CAP\tRATE-DROPS")
+			fmt.Fprintln(w, "----\t------\t-------\t-------\t-------\t-------\t-----\t--------\t----------")
 
 			// Sort by TEID for stable output.
 			teids := make([]uint32, 0, len(teidEntries))
@@ -44,7 +44,7 @@ var listCmd = &cobra.Command{
 
 			for _, teid := range teids {
 				r := teidEntries[teid]
-				fmt.Fprintf(w, "0x%08X\t%s\t%d\t%s\t%s\t%d\t%s\n",
+				fmt.Fprintf(w, "0x%08X\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%d\n",
 					teid,
 					maps.ActionString(r.Action),
 					r.OutIfindex,
@@ -52,6 +52,8 @@ var listCmd = &cobra.Command{
 					maps.MACString(r.SMac),
 					r.PktCount,
 					maps.FormatBytes(r.ByteCount),
+					formatRateCap(r.RatePPS),
+					r.RateDropCount,
 				)
 			}
 		} else {
@@ -60,7 +62,7 @@ var listCmd = &cobra.Command{
 
 		fmt.Fprintln(w)
 
-		// ── ueip_map ──────────────────────────────────────────────────────
+		// ueip_map
 		um, err := maps.OpenUeipMap()
 		if err != nil {
 			return err
@@ -74,8 +76,8 @@ var listCmd = &cobra.Command{
 
 		fmt.Fprintf(w, "=== ueip_map (%d entries) ===\n", len(ueipEntries))
 		if len(ueipEntries) > 0 {
-			fmt.Fprintln(w, "UE IP\tACTION\tIFINDEX\tDST MAC\tSRC MAC\tPACKETS\tBYTES")
-			fmt.Fprintln(w, "-----\t------\t-------\t-------\t-------\t-------\t-----")
+			fmt.Fprintln(w, "UE IP\tACTION\tIFINDEX\tDST MAC\tSRC MAC\tPACKETS\tBYTES\tRATE-CAP\tRATE-DROPS")
+			fmt.Fprintln(w, "-----\t------\t-------\t-------\t-------\t-------\t-----\t--------\t----------")
 
 			// Sort by IP for stable output.
 			ips := make([]uint32, 0, len(ueipEntries))
@@ -87,7 +89,7 @@ var listCmd = &cobra.Command{
 			for _, ipKey := range ips {
 				r := ueipEntries[ipKey]
 				ip := maps.Uint32ToIP(ipKey)
-				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%d\t%s\n",
+				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%d\n",
 					net.IP(ip).String(),
 					maps.ActionString(r.Action),
 					r.OutIfindex,
@@ -95,6 +97,8 @@ var listCmd = &cobra.Command{
 					maps.MACString(r.SMac),
 					r.PktCount,
 					maps.FormatBytes(r.ByteCount),
+					formatRateCap(r.RatePPS),
+					r.RateDropCount,
 				)
 			}
 		} else {
@@ -103,4 +107,11 @@ var listCmd = &cobra.Command{
 
 		return w.Flush()
 	},
+}
+
+func formatRateCap(ratePPS uint32) string {
+	if ratePPS == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d/s", ratePPS)
 }

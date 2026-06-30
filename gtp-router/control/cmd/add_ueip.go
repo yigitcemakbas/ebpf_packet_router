@@ -18,6 +18,7 @@ var (
 	addUeipTeidOut  uint32
 	addUeipDstIP    string
 	addUeipSrcIP    string
+	addUeipRatePPS  uint32
 )
 
 var addUeipCmd = &cobra.Command{
@@ -49,7 +50,12 @@ routing traffic to a specific UE regardless of which tunnel it arrived on.`,
     --dst-ip 10.0.0.1 \
     --out-iface veth-core0 \
     --dmac aa:bb:cc:dd:ee:ff \
-    --smac 11:22:33:44:55:66`,
+    --smac 11:22:33:44:55:66
+
+  # Cap UE 10.1.0.50 to 50 packets/sec regardless of action
+  gtp-ctrl add-ueip --ip 10.1.0.50 --action decap \
+    --out-iface eth1 --dmac aa:bb:cc:dd:ee:ff --smac 11:22:33:44:55:66 \
+    --rate-pps 50`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Parse UE IP 
 		ueip := net.ParseIP(addUeipIP)
@@ -68,7 +74,8 @@ routing traffic to a specific UE regardless of which tunnel it arrived on.`,
 
 		// Build rule
 		rule := &maps.FwdRule{
-			Action: action,
+			Action:  action,
+			RatePPS: addUeipRatePPS,
 		}
 
 		if addUeipOutIface != "" {
@@ -145,6 +152,7 @@ func init() {
 	addUeipCmd.Flags().Uint32Var(&addUeipTeidOut, "teid-out", 0, "Outgoing GTP-U TEID for the encap tunnel (encap action)")
 	addUeipCmd.Flags().StringVar(&addUeipDstIP, "dst-ip", "", "Outer destination IP, e.g. the gNB (encap action)")
 	addUeipCmd.Flags().StringVar(&addUeipSrcIP, "src-ip", "", "Outer source IP for the encap tunnel (encap action)")
+	addUeipCmd.Flags().Uint32Var(&addUeipRatePPS, "rate-pps", 0, "Cap this UE to N packets/sec, dropping the rest (0 = unlimited)")
 
 	_ = addUeipCmd.MarkFlagRequired("ip")
 }

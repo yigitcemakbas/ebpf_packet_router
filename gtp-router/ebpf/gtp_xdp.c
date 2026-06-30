@@ -85,6 +85,33 @@ static __always_inline void bump_rule(struct fwd_rule *rule, __u64 bytes)
 	rule->byte_count += bytes;
 }
 
+/* Per-rule rate cap: a fixed 1-second window counter, not a true token
+ * bucket. Plain read-modify-write on map-value memory, same precedent as
+ * bump_rule() above (a real atomic on this kernel caused a packet-delivery
+ * regression; this is correct enough for per-rule enforcement without it).
+ * Returns 1 if the packet is over budget and should be dropped, 0
+ * otherwise. Plain int, not bool/true/false - no other helper in this file
+ * uses <stdbool.h>-style types, and this avoids relying on it being
+ * available on every clang/kernel-headers combination this builds against. */
+static __always_inline int rate_limited(struct fwd_rule *rule)
+{
+	if (rule->rate_pps == 0)
+		return 0;
+
+	__u64 now = bpf_ktime_get_ns();
+	if (now - rule->window_start_ns >= 1000000000ULL) {
+		rule->window_start_ns = now;
+		rule->window_count = 1;
+		return 0;
+	}
+	if (rule->window_count >= rule->rate_pps) {
+		rule->rate_drop_count++;
+		return 1;
+	}
+	rule->window_count++;
+	return 0;
+}
+
 static __always_inline void rewrite_eth(struct ethhdr *eth, const struct fwd_rule *rule)
 {
 	__builtin_memcpy(eth->h_dest, rule->dmac, ETH_ALEN);
@@ -96,7 +123,7 @@ static __always_inline int decap_gtpu(struct xdp_md *ctx,
 {
 	/* strip_bytes = outer IP + UDP + GTP (not outer Ethernet, 14 B).
 	 * After advancing ctx->data by strip_bytes the layout becomes:
-	 *   new offset  0-13 : old UDP/GTP tail bytes — will be overwritten
+	 *   new offset  0-13 : old UDP/GTP tail bytes - will be overwritten
 	 *   new offset 14+   : inner IP (correct position after Ethernet)
 	 * Write the new Ethernet header at the new ctx->data. */
 	if (bpf_xdp_adjust_head(ctx, (int)strip_bytes))
@@ -218,6 +245,12 @@ static __always_inline int try_encap(struct xdp_md *ctx, __be32 ue_dst, __u64 pk
 		return XDP_PASS;
 	}
 
+	if (rate_limited(rule)) {
+		bump_rule(rule, pkt_len);
+		bump_stats(STAT_DROP, pkt_len);
+		return XDP_DROP;
+	}
+
 	if (encap_gtpu(ctx, rule) < 0) {
 		bump_stats(STAT_DROP, pkt_len);
 		return XDP_DROP;
@@ -245,7 +278,7 @@ int xdp_gtp_router(struct xdp_md *ctx)
 	if (iph->version != 4 || iph->ihl < 5)
 		goto pass;
 
-	/* Non-UDP IPv4 packet → candidate downlink packet to encapsulate. */
+	/* Non-UDP IPv4 packet -> candidate downlink packet to encapsulate. */
 	if (iph->protocol != IPPROTO_UDP)
 		return try_encap(ctx, iph->daddr, pkt_len);
 
@@ -256,7 +289,7 @@ int xdp_gtp_router(struct xdp_md *ctx)
 
 	struct udphdr *udph = CURSOR_ADVANCE(cursor, data_end, struct udphdr);
 
-	/* UDP but not GTP-U → also a downlink encap candidate. */
+	/* UDP but not GTP-U -> also a downlink encap candidate. */
 	if (udph->dest != bpf_htons(GTP_UDP_PORT))
 		return try_encap(ctx, iph->daddr, pkt_len);
 
@@ -293,13 +326,18 @@ int xdp_gtp_router(struct xdp_md *ctx)
 			goto pass;
 	}
 
+	if (rate_limited(rule)) {
+		bump_rule(rule, pkt_len);
+		goto drop;
+	}
+
 	switch (rule->action) {
 	case FWD_ACTION_DROP:
 		bump_rule(rule, pkt_len);
 		bump_stats(STAT_DROP, pkt_len);
 		return XDP_DROP;
 	case FWD_ACTION_DECAP_FWD: {
-		/* Strip tunnel headers only — outer Ethernet stays at ctx->data. */
+		/* Strip tunnel headers only - outer Ethernet stays at ctx->data. */
 		__u32 strip = ip_hdr_len + sizeof(struct udphdr)
 			+ sizeof(struct gtpuhdr) + opt_sz;
 

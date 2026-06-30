@@ -73,7 +73,7 @@ func actionIndex(a uint32) int {
 // / add_ueip.go's flags: both have out-iface/dmac/smac/teid-out/dst-ip/
 // src-ip; only TEID rules additionally have dst-port.
 func defaultFields(target string) []formField {
-	labels := []string{"Out-Iface", "DMac", "SMac", "Teid-Out", "Dst-IP", "Src-IP"}
+	labels := []string{"Out-Iface", "DMac", "SMac", "Teid-Out", "Dst-IP", "Src-IP", "Rate-PPS"}
 	if target == "teid" {
 		labels = append(labels, "Dst-Port")
 	}
@@ -149,6 +149,9 @@ func newEditForm(target string, key uint32, rule *maps.FwdRule) *formModel {
 	}
 	if rule.SrcIP != 0 {
 		setFieldValue(f.fields, "Src-IP", maps.Uint32ToIP(rule.SrcIP).String())
+	}
+	if rule.RatePPS != 0 {
+		setFieldValue(f.fields, "Rate-PPS", fmt.Sprintf("%d", rule.RatePPS))
 	}
 	f.syncFocus()
 	return f
@@ -292,6 +295,13 @@ func (f *formModel) buildRule() (uint32, *maps.FwdRule, error) {
 		if rule.SrcIP, err = maps.IPToUint32(ip); err != nil {
 			return 0, nil, fmt.Errorf("src-ip: %w", err)
 		}
+	}
+	if v := fieldValue(f.fields, "Rate-PPS"); v != "" {
+		p, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return 0, nil, fmt.Errorf("rate-pps: %w", err)
+		}
+		rule.RatePPS = uint32(p)
 	}
 	if f.target == "teid" {
 		if v := fieldValue(f.fields, "Dst-Port"); v != "" {

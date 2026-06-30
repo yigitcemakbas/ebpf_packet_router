@@ -34,6 +34,16 @@ struct fwd_rule{
 	              * Go mirror in control/maps/types.go (FwdRule). */
 	__u64 pkt_count;
 	__u64 byte_count;
+
+	/* Per-rule rate limiting: a fixed 1-second window counter (not a true
+	 * token bucket), enforced in the XDP hook before the rest of the kernel
+	 * network stack ever sees the packet. rate_pps=0 means unlimited. These
+	 * fields keep the struct 8-byte aligned with no extra padding needed
+	 * (offsets 56/60/64/72, ending at 80). */
+	__u32 rate_pps;        /* configured cap, packets/sec; 0 = unlimited */
+	__u32 window_count;    /* packets seen in the current 1s window */
+	__u64 window_start_ns; /* bpf_ktime_get_ns() when the window started */
+	__u64 rate_drop_count; /* packets dropped specifically by this cap */
 };
 
 #endif /* __GTP_ROUTER_H */

@@ -29,10 +29,13 @@ const defaultWidth = 80
 // Width tiers for the rule panels. Columns deliberately omit DST MAC/SRC MAC
 // (static config already shown in full by `gtp-ctrl list`) even at full
 // width - the dashboard's job is the live counters, not re-displaying
-// config. BYTES is the next to go as space gets tighter, since PACKETS and
-// PPS already convey volume/rate.
+// config. DROPPED (rate-limit drops) is prioritized above BYTES, since
+// PACKETS+PPS already convey volume/rate and DROPPED is the differentiating
+// signal for the per-subscriber rate limiting feature - a standard 80-column
+// terminal lands in the medium tier, which keeps DROPPED and drops BYTES;
+// widen to 90+ columns to see BYTES too.
 const (
-	fullWidthThreshold   = 80
+	fullWidthThreshold   = 90
 	mediumWidthThreshold = 60
 )
 
@@ -43,11 +46,11 @@ const (
 func columnsFor(width int, keyLabel string, keyWidth int) (headers []string, widths []int, tooNarrow bool) {
 	switch {
 	case width >= fullWidthThreshold:
-		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "BYTES", "PPS"},
-			[]int{keyWidth, 10, 7, 10, 10, 8}, false
+		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "BYTES", "PPS", "DROPPED"},
+			[]int{keyWidth, 10, 7, 10, 10, 8, 8}, false
 	case width >= mediumWidthThreshold:
-		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "PPS"},
-			[]int{keyWidth, 10, 7, 10, 8}, false
+		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "PPS", "DROPPED"},
+			[]int{keyWidth, 10, 7, 10, 8, 8}, false
 	default:
 		return nil, nil, true
 	}
@@ -501,6 +504,7 @@ func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bo
 			fmt.Sprintf("%d", r.PktCount),
 			maps.FormatBytes(r.ByteCount),
 			fmt.Sprintf("%.1f/s", p),
+			fmt.Sprintf("%d", r.RateDropCount),
 		})
 	}
 	return keys, rows
@@ -596,15 +600,15 @@ func (m model) renderView() string {
 }
 
 // renderPanel picks the column set for the current terminal width and
-// renders the corresponding rows, dropping BYTES from the full 6-column row
+// renders the corresponding rows, dropping BYTES from the full 7-column row
 // produced by buildRows when the medium-width tier is in effect.
 func (m model) renderPanel(keyLabel string, keyWidth int, rows [][]string, selected int) string {
 	headers, widths, tooNarrow := columnsFor(m.width, keyLabel, keyWidth)
 	if tooNarrow {
 		return "(terminal too narrow for table view - resize to at least 60 columns)"
 	}
-	if len(headers) == 5 {
-		rows = dropColumn(rows, 4) // full row is [key, action, ifindex, packets, bytes, pps]; drop bytes
+	if len(headers) == 6 {
+		rows = dropColumn(rows, 4) // full row is [key, action, ifindex, packets, bytes, pps, dropped]; drop bytes
 	}
 	return renderTable(headers, widths, rows, selected)
 }
