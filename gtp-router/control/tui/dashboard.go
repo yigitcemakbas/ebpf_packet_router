@@ -42,15 +42,18 @@ const (
 // columnsFor returns the headers/widths for a rule panel's key column (TEID
 // or UE IP) at the given terminal width. tooNarrow is true when there isn't
 // enough room for any table layout, in which case the caller should show a
-// plain notice instead of attempting to render columns.
+// plain notice instead of attempting to render columns. IFINDEX/PACKETS/PPS
+// were trimmed from their original widths to make room for Q (quarantine
+// status) without re-triggering the overflow that DST MAC/SRC MAC caused
+// originally - values realistically never need the old widths.
 func columnsFor(width int, keyLabel string, keyWidth int) (headers []string, widths []int, tooNarrow bool) {
 	switch {
 	case width >= fullWidthThreshold:
-		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "BYTES", "PPS", "DROPPED"},
-			[]int{keyWidth, 10, 7, 10, 10, 8, 8}, false
+		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "BYTES", "PPS", "DROPPED", "Q"},
+			[]int{keyWidth, 10, 5, 8, 10, 7, 8, 3}, false
 	case width >= mediumWidthThreshold:
-		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "PPS", "DROPPED"},
-			[]int{keyWidth, 10, 7, 10, 8, 8}, false
+		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "PPS", "DROPPED", "Q"},
+			[]int{keyWidth, 10, 5, 8, 7, 8, 3}, false
 	default:
 		return nil, nil, true
 	}
@@ -468,6 +471,18 @@ func (m model) renderConfirm() string {
 	return panelStyle.Render(titleStyle.Render("Confirm delete") + "\n\n" + body)
 }
 
+// quarantineMarker is a terse "Q"/"-" flag for the live table (full detail -
+// remaining seconds - is in `gtp-ctrl list`'s QUARANTINE column and the
+// snapshot). QuarantineUntilNs is a bpf_ktime_get_ns() (CLOCK_MONOTONIC)
+// deadline set by the XDP program, so it's compared against
+// maps.MonotonicNowNs(), not time.Now() (wall-clock; wrong clock domain).
+func quarantineMarker(r *maps.FwdRule) string {
+	if r.QuarantineUntilNs != 0 && maps.MonotonicNowNs() < r.QuarantineUntilNs {
+		return "Q"
+	}
+	return "-"
+}
+
 func pps(curr, prev uint64, elapsed float64, havePrev bool) float64 {
 	if !havePrev || elapsed <= 0 || curr < prev {
 		return 0
@@ -505,6 +520,7 @@ func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bo
 			maps.FormatBytes(r.ByteCount),
 			fmt.Sprintf("%.1f/s", p),
 			fmt.Sprintf("%d", r.RateDropCount),
+			quarantineMarker(r),
 		})
 	}
 	return keys, rows
@@ -600,15 +616,15 @@ func (m model) renderView() string {
 }
 
 // renderPanel picks the column set for the current terminal width and
-// renders the corresponding rows, dropping BYTES from the full 7-column row
+// renders the corresponding rows, dropping BYTES from the full 8-column row
 // produced by buildRows when the medium-width tier is in effect.
 func (m model) renderPanel(keyLabel string, keyWidth int, rows [][]string, selected int) string {
 	headers, widths, tooNarrow := columnsFor(m.width, keyLabel, keyWidth)
 	if tooNarrow {
 		return "(terminal too narrow for table view - resize to at least 60 columns)"
 	}
-	if len(headers) == 6 {
-		rows = dropColumn(rows, 4) // full row is [key, action, ifindex, packets, bytes, pps, dropped]; drop bytes
+	if len(headers) == 7 {
+		rows = dropColumn(rows, 4) // full row is [key, action, ifindex, packets, bytes, pps, dropped, q]; drop bytes
 	}
 	return renderTable(headers, widths, rows, selected)
 }

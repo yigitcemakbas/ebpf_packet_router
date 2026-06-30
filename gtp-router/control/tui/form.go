@@ -73,7 +73,10 @@ func actionIndex(a uint32) int {
 // / add_ueip.go's flags: both have out-iface/dmac/smac/teid-out/dst-ip/
 // src-ip; only TEID rules additionally have dst-port.
 func defaultFields(target string) []formField {
-	labels := []string{"Out-Iface", "DMac", "SMac", "Teid-Out", "Dst-IP", "Src-IP", "Rate-PPS"}
+	labels := []string{
+		"Out-Iface", "DMac", "SMac", "Teid-Out", "Dst-IP", "Src-IP",
+		"Rate-PPS", "Q-Threshold", "Q-Seconds",
+	}
 	if target == "teid" {
 		labels = append(labels, "Dst-Port")
 	}
@@ -152,6 +155,12 @@ func newEditForm(target string, key uint32, rule *maps.FwdRule) *formModel {
 	}
 	if rule.RatePPS != 0 {
 		setFieldValue(f.fields, "Rate-PPS", fmt.Sprintf("%d", rule.RatePPS))
+	}
+	if rule.QuarantineThreshold != 0 {
+		setFieldValue(f.fields, "Q-Threshold", fmt.Sprintf("%d", rule.QuarantineThreshold))
+	}
+	if rule.QuarantineSeconds != 0 {
+		setFieldValue(f.fields, "Q-Seconds", fmt.Sprintf("%d", rule.QuarantineSeconds))
 	}
 	f.syncFocus()
 	return f
@@ -302,6 +311,20 @@ func (f *formModel) buildRule() (uint32, *maps.FwdRule, error) {
 			return 0, nil, fmt.Errorf("rate-pps: %w", err)
 		}
 		rule.RatePPS = uint32(p)
+	}
+	if v := fieldValue(f.fields, "Q-Threshold"); v != "" {
+		p, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return 0, nil, fmt.Errorf("q-threshold: %w", err)
+		}
+		rule.QuarantineThreshold = uint32(p)
+	}
+	if v := fieldValue(f.fields, "Q-Seconds"); v != "" {
+		p, err := strconv.ParseUint(v, 10, 32)
+		if err != nil {
+			return 0, nil, fmt.Errorf("q-seconds: %w", err)
+		}
+		rule.QuarantineSeconds = uint32(p)
 	}
 	if f.target == "teid" {
 		if v := fieldValue(f.fields, "Dst-Port"); v != "" {

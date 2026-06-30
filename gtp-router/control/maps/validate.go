@@ -7,6 +7,12 @@ import "fmt"
 // the dashboard's interactive rule editor, so the two can never enforce
 // different rules.
 func ValidateRule(rule *FwdRule) error {
+	// Independent of action: a configured quarantine needs a duration, or a
+	// triggered quarantine would self-release instantly (now+0).
+	if rule.QuarantineThreshold != 0 && rule.QuarantineSeconds == 0 {
+		return fmt.Errorf("--quarantine-seconds must be > 0 when --quarantine-threshold is set")
+	}
+
 	if rule.Action == ActionDrop {
 		return nil
 	}

@@ -85,26 +85,57 @@ static __always_inline void bump_rule(struct fwd_rule *rule, __u64 bytes)
 	rule->byte_count += bytes;
 }
 
-/* Per-rule rate cap: a fixed 1-second window counter, not a true token
- * bucket. Plain read-modify-write on map-value memory, same precedent as
- * bump_rule() above (a real atomic on this kernel caused a packet-delivery
- * regression; this is correct enough for per-rule enforcement without it).
- * Returns 1 if the packet is over budget and should be dropped, 0
- * otherwise. Plain int, not bool/true/false - no other helper in this file
- * uses <stdbool.h>-style types, and this avoids relying on it being
- * available on every clang/kernel-headers combination this builds against. */
-static __always_inline int rate_limited(struct fwd_rule *rule)
+/* Per-rule rate cap plus autonomous quarantine. Plain read-modify-write on
+ * map-value memory throughout, same precedent as bump_rule() above (a real
+ * atomic on this kernel caused a packet-delivery regression; this is correct
+ * enough for per-rule enforcement without it). Returns 1 if the packet
+ * should be dropped, 0 otherwise. Plain int, not bool/true/false - no other
+ * helper in this file uses <stdbool.h>-style types, and this avoids relying
+ * on it being available on every clang/kernel-headers combination this
+ * builds against.
+ *
+ * Quarantine is a hard block triggered by repeated consecutive rate-limit
+ * violations (no human in the loop) and self-releases once its deadline
+ * passes - both decisions happen here, packet-triggered, with no separate
+ * userspace poller deciding anything. */
+static __always_inline int enforce_policy(struct fwd_rule *rule)
 {
-	if (rule->rate_pps == 0)
-		return 0;
-
 	__u64 now = bpf_ktime_get_ns();
-	if (now - rule->window_start_ns >= 1000000000ULL) {
-		rule->window_start_ns = now;
-		rule->window_count = 1;
-		return 0;
+
+	/* Quarantine is checked first and is absolute, independent of rate_pps. */
+	if (rule->quarantine_until_ns != 0) {
+		if (now < rule->quarantine_until_ns)
+			return 1; /* still quarantined */
+		/* Cooldown elapsed: self-release. The next packet after the
+		 * deadline is what triggers this - there is no timer/poller. */
+		rule->quarantine_until_ns = 0;
+		rule->violation_streak = 0;
 	}
+
+	if (rule->rate_pps == 0)
+		return 0; /* unlimited: nothing left to enforce */
+
+	if (now - rule->window_start_ns >= 1000000000ULL) {
+		/* Window rolled over: score the window that just ended before
+		 * starting the new one. */
+		if (rule->window_violated) {
+			rule->violation_streak++;
+			if (rule->quarantine_threshold != 0 &&
+			    rule->violation_streak >= rule->quarantine_threshold) {
+				rule->quarantine_until_ns = now +
+					(__u64)rule->quarantine_seconds * 1000000000ULL;
+				rule->violation_streak = 0;
+			}
+		} else {
+			rule->violation_streak = 0;
+		}
+		rule->window_start_ns = now;
+		rule->window_count = 0;
+		rule->window_violated = 0;
+	}
+
 	if (rule->window_count >= rule->rate_pps) {
+		rule->window_violated = 1;
 		rule->rate_drop_count++;
 		return 1;
 	}
@@ -245,7 +276,7 @@ static __always_inline int try_encap(struct xdp_md *ctx, __be32 ue_dst, __u64 pk
 		return XDP_PASS;
 	}
 
-	if (rate_limited(rule)) {
+	if (enforce_policy(rule)) {
 		bump_rule(rule, pkt_len);
 		bump_stats(STAT_DROP, pkt_len);
 		return XDP_DROP;
@@ -326,7 +357,7 @@ int xdp_gtp_router(struct xdp_md *ctx)
 			goto pass;
 	}
 
-	if (rate_limited(rule)) {
+	if (enforce_policy(rule)) {
 		bump_rule(rule, pkt_len);
 		goto drop;
 	}

@@ -38,7 +38,7 @@ func ParseAction(s string) (uint32, error) {
 	}
 }
 
-// Mirrors struct fwd_rule in gtp_router.h (80 bytes)
+// Mirrors struct fwd_rule in gtp_router.h (104 bytes)
 type FwdRule struct {
 	Action     uint32
 	OutIfindex uint32
@@ -52,12 +52,22 @@ type FwdRule struct {
 	PktCount   uint64
 	ByteCount  uint64
 
-	// Per-rule rate limiting (see ebpf/gtp_xdp.c's rate_limited()).
+	// Per-rule rate limiting (see ebpf/gtp_xdp.c's enforce_policy()).
 	// RatePPS=0 means unlimited.
 	RatePPS       uint32
 	WindowCount   uint32
 	WindowStartNs uint64
 	RateDropCount uint64
+
+	// Autonomous quarantine: QuarantineThreshold=0 disables it (default).
+	// QuarantineUntilNs is a bpf_ktime_get_ns() (CLOCK_MONOTONIC) deadline,
+	// not wall-clock time - compare against unix.ClockGettime(CLOCK_MONOTONIC),
+	// not time.Now().
+	ViolationStreak     uint32
+	QuarantineThreshold uint32
+	QuarantineSeconds   uint32
+	WindowViolated      uint32
+	QuarantineUntilNs   uint64
 }
 
 func IPToUint32(ip net.IP) (uint32, error) {

@@ -32,8 +32,8 @@ var listCmd = &cobra.Command{
 
 		fmt.Fprintf(w, "=== teid_map (%d entries) ===\n", len(teidEntries))
 		if len(teidEntries) > 0 {
-			fmt.Fprintln(w, "TEID\tACTION\tIFINDEX\tDST MAC\tSRC MAC\tPACKETS\tBYTES\tRATE-CAP\tRATE-DROPS")
-			fmt.Fprintln(w, "----\t------\t-------\t-------\t-------\t-------\t-----\t--------\t----------")
+			fmt.Fprintln(w, "TEID\tACTION\tIFINDEX\tDST MAC\tSRC MAC\tPACKETS\tBYTES\tRATE-CAP\tRATE-DROPS\tQUARANTINE")
+			fmt.Fprintln(w, "----\t------\t-------\t-------\t-------\t-------\t-----\t--------\t----------\t----------")
 
 			// Sort by TEID for stable output.
 			teids := make([]uint32, 0, len(teidEntries))
@@ -44,7 +44,7 @@ var listCmd = &cobra.Command{
 
 			for _, teid := range teids {
 				r := teidEntries[teid]
-				fmt.Fprintf(w, "0x%08X\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%d\n",
+				fmt.Fprintf(w, "0x%08X\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%d\t%s\n",
 					teid,
 					maps.ActionString(r.Action),
 					r.OutIfindex,
@@ -54,6 +54,7 @@ var listCmd = &cobra.Command{
 					maps.FormatBytes(r.ByteCount),
 					formatRateCap(r.RatePPS),
 					r.RateDropCount,
+					quarantineStatus(r),
 				)
 			}
 		} else {
@@ -76,8 +77,8 @@ var listCmd = &cobra.Command{
 
 		fmt.Fprintf(w, "=== ueip_map (%d entries) ===\n", len(ueipEntries))
 		if len(ueipEntries) > 0 {
-			fmt.Fprintln(w, "UE IP\tACTION\tIFINDEX\tDST MAC\tSRC MAC\tPACKETS\tBYTES\tRATE-CAP\tRATE-DROPS")
-			fmt.Fprintln(w, "-----\t------\t-------\t-------\t-------\t-------\t-----\t--------\t----------")
+			fmt.Fprintln(w, "UE IP\tACTION\tIFINDEX\tDST MAC\tSRC MAC\tPACKETS\tBYTES\tRATE-CAP\tRATE-DROPS\tQUARANTINE")
+			fmt.Fprintln(w, "-----\t------\t-------\t-------\t-------\t-------\t-----\t--------\t----------\t----------")
 
 			// Sort by IP for stable output.
 			ips := make([]uint32, 0, len(ueipEntries))
@@ -89,7 +90,7 @@ var listCmd = &cobra.Command{
 			for _, ipKey := range ips {
 				r := ueipEntries[ipKey]
 				ip := maps.Uint32ToIP(ipKey)
-				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%d\n",
+				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%d\t%s\n",
 					net.IP(ip).String(),
 					maps.ActionString(r.Action),
 					r.OutIfindex,
@@ -99,6 +100,7 @@ var listCmd = &cobra.Command{
 					maps.FormatBytes(r.ByteCount),
 					formatRateCap(r.RatePPS),
 					r.RateDropCount,
+					quarantineStatus(r),
 				)
 			}
 		} else {
@@ -114,4 +116,23 @@ func formatRateCap(ratePPS uint32) string {
 		return "-"
 	}
 	return fmt.Sprintf("%d/s", ratePPS)
+}
+
+// quarantineStatus reports whether a rule is currently under an active
+// autonomous quarantine. QuarantineUntilNs is a bpf_ktime_get_ns()
+// (CLOCK_MONOTONIC) deadline set by the XDP program itself, not wall-clock
+// time, so it's compared against maps.MonotonicNowNs() - the same clock
+// domain - not time.Now().
+func quarantineStatus(r *maps.FwdRule) string {
+	if r.QuarantineUntilNs == 0 {
+		return "-"
+	}
+	now := maps.MonotonicNowNs()
+	if now >= r.QuarantineUntilNs {
+		// Cooldown elapsed but not yet cleared - that only happens when the
+		// next packet for this rule arrives (no external poller does it).
+		return "pending release"
+	}
+	remaining := (r.QuarantineUntilNs - now) / 1e9
+	return fmt.Sprintf("YES (%ds left)", remaining)
 }

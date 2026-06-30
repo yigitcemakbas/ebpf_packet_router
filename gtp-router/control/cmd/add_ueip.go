@@ -10,15 +10,17 @@ import (
 )
 
 var (
-	addUeipIP       string
-	addUeipAction   string
-	addUeipOutIface string
-	addUeipDMac     string
-	addUeipSMac     string
-	addUeipTeidOut  uint32
-	addUeipDstIP    string
-	addUeipSrcIP    string
-	addUeipRatePPS  uint32
+	addUeipIP                  string
+	addUeipAction              string
+	addUeipOutIface            string
+	addUeipDMac                string
+	addUeipSMac                string
+	addUeipTeidOut             uint32
+	addUeipDstIP               string
+	addUeipSrcIP               string
+	addUeipRatePPS             uint32
+	addUeipQuarantineThreshold uint32
+	addUeipQuarantineSeconds   uint32
 )
 
 var addUeipCmd = &cobra.Command{
@@ -74,8 +76,10 @@ routing traffic to a specific UE regardless of which tunnel it arrived on.`,
 
 		// Build rule
 		rule := &maps.FwdRule{
-			Action:  action,
-			RatePPS: addUeipRatePPS,
+			Action:              action,
+			RatePPS:             addUeipRatePPS,
+			QuarantineThreshold: addUeipQuarantineThreshold,
+			QuarantineSeconds:   addUeipQuarantineSeconds,
 		}
 
 		if addUeipOutIface != "" {
@@ -153,6 +157,8 @@ func init() {
 	addUeipCmd.Flags().StringVar(&addUeipDstIP, "dst-ip", "", "Outer destination IP, e.g. the gNB (encap action)")
 	addUeipCmd.Flags().StringVar(&addUeipSrcIP, "src-ip", "", "Outer source IP for the encap tunnel (encap action)")
 	addUeipCmd.Flags().Uint32Var(&addUeipRatePPS, "rate-pps", 0, "Cap this UE to N packets/sec, dropping the rest (0 = unlimited)")
+	addUeipCmd.Flags().Uint32Var(&addUeipQuarantineThreshold, "quarantine-threshold", 0, "Consecutive rate-limit violations before auto-quarantine (0 = disabled)")
+	addUeipCmd.Flags().Uint32Var(&addUeipQuarantineSeconds, "quarantine-seconds", 0, "How long an auto-quarantine lasts (required if --quarantine-threshold is set)")
 
 	_ = addUeipCmd.MarkFlagRequired("ip")
 }
