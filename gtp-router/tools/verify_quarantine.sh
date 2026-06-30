@@ -20,14 +20,19 @@
 #   - tcpdump is installed
 #
 # Usage:
-#   sudo bash tools/verify_quarantine.sh [--teid 0xBAD0] [--rate-pps 5] [--threshold 2] [--seconds 5]
+#   sudo bash tools/verify_quarantine.sh [--teid 0xBAD0] [--rate-pps 5] [--threshold 2] [--seconds 15]
+#
+# --seconds needs enough margin to outlast the flood + probe phases' own
+# wall-clock overhead (~7-8s combined) - too short and the quarantine can
+# expire mid-probe, which looks like a leak but is actually correct
+# self-release timing colliding with the test's own slowness.
 
 set -uo pipefail
 
 TEID="${TEID:-0xBAD0}"
 RATE_PPS="${RATE_PPS:-5}"
 Q_THRESHOLD="${Q_THRESHOLD:-2}"
-Q_SECONDS="${Q_SECONDS:-5}"
+Q_SECONDS="${Q_SECONDS:-15}"
 INNER_SRC="${INNER_SRC:-10.1.0.1}"
 INNER_DST="${INNER_DST:-10.1.0.2}"
 OUT_IFACE="${OUT_IFACE:-veth-core0}"
