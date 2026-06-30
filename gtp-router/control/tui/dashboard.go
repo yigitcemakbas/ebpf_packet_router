@@ -232,11 +232,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case copyResultMsg:
 		if msg.err != nil {
-			m.statusMsg = "copy failed: " + msg.err.Error()
+			m.statusMsg = "snapshot failed: " + msg.err.Error()
 		} else {
-			m.statusMsg = "copied dashboard snapshot to clipboard"
+			m.statusMsg = "saved snapshot to " + msg.path + " (cat it, or copy from your editor)"
 		}
-		m.statusUntil = time.Now().Add(3 * time.Second)
+		m.statusUntil = time.Now().Add(6 * time.Second)
 		return m, nil
 
 	case tickMsg:
@@ -341,21 +341,29 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// snapshotPath is a fixed location so "c" always saves to the same place.
+const snapshotPath = "/tmp/gtp-dashboard-snapshot.txt"
+
 type copyResultMsg struct {
-	err error
+	path string
+	err  error
 }
 
-// copyCmd writes the OSC 52 "set clipboard" escape sequence directly to the
-// terminal. Most modern terminal emulators (and tmux, with `set -g
-// set-clipboard on`) intercept this and copy the payload to the system
-// clipboard - including over SSH, since the clipboard belongs to the
-// terminal on the user's end, not this machine. No clipboard tool (xclip/
-// xsel/wl-clipboard) is required here as a result.
+// copyCmd saves the current snapshot to a fixed file - the reliable part,
+// since it doesn't depend on terminal/tmux clipboard support - and also
+// attempts an OSC 52 "set clipboard" escape sequence as a best-effort bonus
+// (some terminals pick this up, others silently ignore it; failure there
+// doesn't affect the file write). Either way, the snapshot now sits
+// somewhere static that isn't overwritten a second later, so it can be
+// opened and copied at your own pace.
 func copyCmd(content string) tea.Cmd {
 	return func() tea.Msg {
+		if err := os.WriteFile(snapshotPath, []byte(content), 0644); err != nil {
+			return copyResultMsg{err: err}
+		}
 		encoded := base64.StdEncoding.EncodeToString([]byte(content))
-		_, err := fmt.Fprintf(os.Stdout, "\x1b]52;c;%s\x07", encoded)
-		return copyResultMsg{err: err}
+		fmt.Fprintf(os.Stdout, "\x1b]52;c;%s\x07", encoded) // best-effort; errors ignored
+		return copyResultMsg{path: snapshotPath}
 	}
 }
 
@@ -579,7 +587,7 @@ func (m model) renderView() string {
 	ueipPanel := panelStyle.Render(titleStyle.Render(ueipTitle) + "\n" + m.renderPanel("UE IP", 15, m.ueipRows, ueipSel))
 	statsPanel := panelStyle.Render(titleStyle.Render("global verdict counters") + "\n" + m.renderStats())
 
-	footer := footerStyle.Render("tab: switch panel   up/down: select   a: add   e: edit   d: delete   c: copy   q: quit")
+	footer := footerStyle.Render("tab: switch panel   up/down: select   a: add   e: edit   d: delete   c: snapshot   q: quit")
 	if time.Now().Before(m.statusUntil) {
 		footer = footerStyle.Render(m.statusMsg) + "\n" + footer
 	}
