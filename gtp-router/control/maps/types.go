@@ -110,11 +110,15 @@ func MACString(mac [6]byte) string {
 		mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 }
 
+// FormatBytes never includes a space: this is consumed by `gtp-ctrl list`,
+// which the verify_*.sh scripts awk-column-parse, and a space here silently
+// shifts the field position of every column after it (this exact bug has
+// broken tools/verify_ratelimit.sh twice already).
 func FormatBytes(b uint64) string {
 	switch {
-	case b >= 1<<30: return fmt.Sprintf("%.2f GB", float64(b)/float64(1<<30))
-	case b >= 1<<20: return fmt.Sprintf("%.2f MB", float64(b)/float64(1<<20))
-	case b >= 1<<10: return fmt.Sprintf("%.2f KB", float64(b)/float64(1<<10))
-	default:         return fmt.Sprintf("%d B", b)
+	case b >= 1<<30: return fmt.Sprintf("%.2fGB", float64(b)/float64(1<<30))
+	case b >= 1<<20: return fmt.Sprintf("%.2fMB", float64(b)/float64(1<<20))
+	case b >= 1<<10: return fmt.Sprintf("%.2fKB", float64(b)/float64(1<<10))
+	default:         return fmt.Sprintf("%dB", b)
 	}
 }

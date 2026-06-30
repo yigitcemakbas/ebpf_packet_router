@@ -58,6 +58,25 @@ ok()   { echo "  [PASS] $*"; ((PASS++)); }
 fail() { echo "  [FAIL] $*"; ((FAIL++)); }
 info() { echo "  [info] $*"; }
 
+# Looks up a named column's value from `gtp-ctrl list`'s table for the row
+# whose first column equals $1, by header name rather than a fixed position.
+# This script has been broken twice by position-based parsing (BYTES'
+# "5.18 KB" used to shift later columns; then a new QUARANTINE column was
+# appended after RATE-DROPS) - looking up by header name survives both
+# kinds of change, as long as every column stays a single whitespace-free
+# token (a project convention now, see control/maps/types.go's FormatBytes).
+list_column() {
+  local key="$1" col="$2"
+  "$GTP_CTRL" list 2>/dev/null | awk -v key="$key" -v col="$col" '
+    $1 == "TEID" || $1 == "UE-IP" {
+      idx = 0
+      for (i = 1; i <= NF; i++) if ($i == col) idx = i
+      next
+    }
+    idx > 0 && $1 == key { print $idx }
+  '
+}
+
 echo
 echo "══════════════════════════════════════════════════════"
 echo " GTP-U XDP Router — Per-Subscriber Rate Limit Verification"
@@ -122,12 +141,8 @@ GNB1_MAC=$(cat /sys/class/net/veth-gnb1/address)
   --rate-pps "$RATE_PPS" || { fail "add-teid failed"; exit 1; }
 echo
 
-# Read baseline RATE-DROPS for this TEID. Use the last field rather than a
-# fixed column index: BYTES is formatted like "5.18 KB" (a space inside one
-# logical column), which shifts every column position after it by one under
-# awk's default whitespace splitting - RATE-DROPS is reliably the last field
-# on the line regardless of how BYTES splits.
-DROPS_BEFORE=$("$GTP_CTRL" list 2>/dev/null | awk -v teid="$TEID_HEX" '$1==teid{print $NF}')
+# Read baseline RATE-DROPS for this TEID.
+DROPS_BEFORE=$(list_column "$TEID_HEX" "RATE-DROPS")
 DROPS_BEFORE=${DROPS_BEFORE:-0}
 info "RATE-DROPS before: $DROPS_BEFORE"
 echo
@@ -185,7 +200,7 @@ fi
 echo
 echo "[ Checking RATE-DROPS counter ]"
 sleep 0.3
-DROPS_AFTER=$("$GTP_CTRL" list 2>/dev/null | awk -v teid="$TEID_HEX" '$1==teid{print $NF}')
+DROPS_AFTER=$(list_column "$TEID_HEX" "RATE-DROPS")
 DROPS_AFTER=${DROPS_AFTER:-0}
 DROPS_DELTA=$(( DROPS_AFTER - DROPS_BEFORE ))
 
