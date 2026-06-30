@@ -122,9 +122,12 @@ GNB1_MAC=$(cat /sys/class/net/veth-gnb1/address)
   --rate-pps "$RATE_PPS" || { fail "add-teid failed"; exit 1; }
 echo
 
-# Read baseline RATE-DROPS for this TEID (column 9: TEID/ACTION/IFINDEX/
-# DST MAC/SRC MAC/PACKETS/BYTES/RATE-CAP/RATE-DROPS)
-DROPS_BEFORE=$("$GTP_CTRL" list 2>/dev/null | awk -v teid="$TEID_HEX" '$1==teid{print $9}')
+# Read baseline RATE-DROPS for this TEID. Use the last field rather than a
+# fixed column index: BYTES is formatted like "5.18 KB" (a space inside one
+# logical column), which shifts every column position after it by one under
+# awk's default whitespace splitting - RATE-DROPS is reliably the last field
+# on the line regardless of how BYTES splits.
+DROPS_BEFORE=$("$GTP_CTRL" list 2>/dev/null | awk -v teid="$TEID_HEX" '$1==teid{print $NF}')
 DROPS_BEFORE=${DROPS_BEFORE:-0}
 info "RATE-DROPS before: $DROPS_BEFORE"
 echo
@@ -182,7 +185,7 @@ fi
 echo
 echo "[ Checking RATE-DROPS counter ]"
 sleep 0.3
-DROPS_AFTER=$("$GTP_CTRL" list 2>/dev/null | awk -v teid="$TEID_HEX" '$1==teid{print $9}')
+DROPS_AFTER=$("$GTP_CTRL" list 2>/dev/null | awk -v teid="$TEID_HEX" '$1==teid{print $NF}')
 DROPS_AFTER=${DROPS_AFTER:-0}
 DROPS_DELTA=$(( DROPS_AFTER - DROPS_BEFORE ))
 
