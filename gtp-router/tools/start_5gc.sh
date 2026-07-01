@@ -73,11 +73,13 @@ fi
 mkdir -p "$LOGDIR"
 
 # wait_port <ip> <port> <label>
+# Uses `ss -lnp` (all protocols) not `ss -tlnp`, because PFCP/GTP are UDP and
+# NGAP is SCTP - a TCP-only check would never see them and print false WARNs.
 wait_port() {
   local ip="$1" port="$2" label="$3"
   local i=0
   printf "  starting %-8s ... " "$label"
-  while ! ss -tlnp 2>/dev/null | grep -q "${ip}:${port}"; do
+  while ! ss -lnp 2>/dev/null | grep -q "${ip}:${port} "; do
     sleep 0.5
     i=$(( i + 1 ))
     if [[ $i -ge 30 ]]; then
@@ -88,9 +90,11 @@ wait_port() {
   echo "ok  (${ip}:${port})"
 }
 
+# Truncate the log on each fresh start so stale lines from previous runs
+# don't get interleaved and confuse diagnosis.
 start_nf() {
   local label="$1" bin="$2"
-  "$BIN/$bin" >> "$LOGDIR/$label.log" 2>&1 &
+  "$BIN/$bin" > "$LOGDIR/$label.log" 2>&1 &
 }
 
 echo
@@ -102,7 +106,7 @@ start_nf nrf  open5gs-nrfd
 wait_port 127.0.0.10 7777 nrf
 
 start_nf scp  open5gs-scpd
-wait_port 127.0.1.10 7777 scp
+wait_port 127.0.0.200 7777 scp
 
 start_nf ausf open5gs-ausfd
 start_nf udm  open5gs-udmd
