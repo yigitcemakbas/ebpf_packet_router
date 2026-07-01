@@ -1,29 +1,55 @@
 #!/usr/bin/env bash
 # tools/start_5gc.sh
 #
-# Starts all Open5GS 5G SA network functions in the correct order,
-# waits for each one to confirm it is listening before starting the next,
-# and tails all logs into a single tmux session with one named window per NF.
+# Starts all Open5GS 5G SA network functions in the correct order.
+# Each NF runs in the background and logs to /tmp/open5gs/<nf>.log.
 #
 # Usage:
-#   sudo bash tools/start_5gc.sh [--open5gs ~/open5gs]
+#   sudo bash tools/start_5gc.sh [--open5gs /home/youruser/open5gs]
 #
-# Prerequisites:
-#   - Open5GS built and installed (see SETUP_5GC.md)
-#   - MongoDB running: sudo systemctl start mongodb
-#   - tmux installed: apt install tmux
+# View all logs live:
+#   sudo bash tools/start_5gc.sh --logs
+#
+# Check status:
+#   sudo bash tools/start_5gc.sh --status
+#
+# Stop everything:
+#   sudo bash tools/stop_5gc.sh
 
 set -euo pipefail
 
-OPEN5GS="${OPEN5GS:-$HOME/open5gs}"
-SESSION="5gc"
+OPEN5GS="${OPEN5GS:-/home/$(logname)/open5gs}"
+LOGDIR="/tmp/open5gs"
+MODE="start"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --open5gs) OPEN5GS="$2"; shift 2 ;;
+    --logs)    MODE="logs" ;;
+    --status)  MODE="status" ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
+
+if [[ "$MODE" == "logs" ]]; then
+  exec tail -f "$LOGDIR"/*.log
+fi
+
+if [[ "$MODE" == "status" ]]; then
+  echo
+  printf "  %-8s  %-6s  %s\n" "NF" "PID" "STATUS"
+  printf "  %-8s  %-6s  %s\n" "--------" "------" "------"
+  for nf in nrf scp ausf udm udr pcf nssf bsf smf upf amf; do
+    pid=$(pgrep -f "open5gs-${nf}d" 2>/dev/null || true)
+    if [[ -n "$pid" ]]; then
+      printf "  %-8s  %-6s  running\n" "$nf" "$pid"
+    else
+      printf "  %-8s  %-6s  STOPPED\n" "$nf" "-"
+    fi
+  done
+  echo
+  exit 0
+fi
 
 if [[ $EUID -ne 0 ]]; then
   echo "error: must be run as root" >&2
@@ -40,94 +66,74 @@ fi
 
 if ! systemctl is-active --quiet mongodb 2>/dev/null && \
    ! systemctl is-active --quiet mongod  2>/dev/null; then
-  echo "error: MongoDB is not running. Start it first:"
-  echo "  sudo systemctl start mongodb"
+  echo "error: MongoDB is not running. Run: sudo systemctl start mongodb" >&2
   exit 1
 fi
 
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "Session '$SESSION' already exists. Attaching..."
-  exec tmux attach -t "$SESSION"
-fi
+mkdir -p "$LOGDIR"
 
-# wait_port <ip> <port> <label> <timeout_secs>
+# wait_port <ip> <port> <label>
 wait_port() {
-  local ip="$1" port="$2" label="$3" timeout="${4:-10}"
+  local ip="$1" port="$2" label="$3"
   local i=0
+  printf "  starting %-8s ... " "$label"
   while ! ss -tlnp 2>/dev/null | grep -q "${ip}:${port}"; do
     sleep 0.5
     i=$(( i + 1 ))
-    if [[ $i -ge $(( timeout * 2 )) ]]; then
-      echo "  [WARN] $label did not bind ${ip}:${port} within ${timeout}s - check the '$label' window"
+    if [[ $i -ge 30 ]]; then
+      echo "WARN (did not bind ${ip}:${port} within 15s - see $LOGDIR/${label}.log)"
       return
     fi
   done
-  echo "  [ok]   $label listening on ${ip}:${port}"
+  echo "ok  (${ip}:${port})"
 }
 
-echo
-echo "Starting Open5GS 5G SA core..."
-echo "  Install path : $BIN"
-echo "  tmux session : $SESSION"
-echo
-
-# Start each NF in a named tmux window. The NRF must be first; everything
-# else registers with it on startup. Port numbers match Open5GS defaults
-# for a single-host loopback deployment.
 start_nf() {
-  local name="$1" bin="$2"
-  if tmux has-session -t "$SESSION" 2>/dev/null; then
-    tmux new-window -t "$SESSION" -n "$name" "export LD_LIBRARY_PATH='$OPEN5GS/install/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH}'; exec sudo -E $BIN/$bin"
-  else
-    tmux new-session -d -s "$SESSION" -n "$name" "export LD_LIBRARY_PATH='$OPEN5GS/install/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH}'; exec sudo -E $BIN/$bin"
-  fi
+  local label="$1" bin="$2"
+  "$BIN/$bin" >> "$LOGDIR/$label.log" 2>&1 &
 }
 
-# NRF - service registry, everything else depends on it
-start_nf "nrf"  "open5gs-nrfd"
-wait_port 127.0.0.10 7777 "nrf" 10
+echo
+echo "Open5GS install : $BIN"
+echo "Logs            : $LOGDIR/<nf>.log"
+echo
 
-# SCP - service communication proxy
-start_nf "scp"  "open5gs-scpd"
-wait_port 127.0.1.10 7777 "scp" 8
+start_nf nrf  open5gs-nrfd
+wait_port 127.0.0.10 7777 nrf
 
-# Core control plane
-start_nf "ausf" "open5gs-ausfd"
-start_nf "udm"  "open5gs-udmd"
-start_nf "udr"  "open5gs-udrd"
-start_nf "pcf"  "open5gs-pcfd"
-start_nf "nssf" "open5gs-nssfd"
-start_nf "bsf"  "open5gs-bsfd"
+start_nf scp  open5gs-scpd
+wait_port 127.0.1.10 7777 scp
+
+start_nf ausf open5gs-ausfd
+start_nf udm  open5gs-udmd
+start_nf udr  open5gs-udrd
+start_nf pcf  open5gs-pcfd
+start_nf nssf open5gs-nssfd
+start_nf bsf  open5gs-bsfd
 sleep 2
 
-# SMF and UPF (PFCP peers - SMF must start before UPF connects)
-start_nf "smf"  "open5gs-smfd"
-wait_port 127.0.0.4 8805 "smf" 10
+start_nf smf  open5gs-smfd
+wait_port 127.0.0.4 8805 smf
 
-start_nf "upf"  "open5gs-upfd"
-wait_port 127.0.0.7 2152 "upf" 10
+start_nf upf  open5gs-upfd
+wait_port 127.0.0.7 2152 upf
 
-# AMF - last, depends on AUSF/UDM/PCF/NSSF all being registered
-start_nf "amf"  "open5gs-amfd"
-wait_port 127.0.0.5 38412 "amf" 15
+start_nf amf  open5gs-amfd
+wait_port 127.0.0.5 38412 amf
 
 echo
 echo "All network functions started."
 echo
-echo "Next step - add a test subscriber (if not already done):"
+echo "Add test subscriber (run once):"
 echo
-echo "  sudo $OPEN5GS/install/bin/open5gs-dbctl add \\"
-echo "    999700000000001 \\"
-echo "    465B5CE8B199B49FAA5F0A2EE238A6BC \\"
-echo "    E8ED289DEBA952E4283B54E88E6183CA"
+echo "  sudo $BIN/open5gs-dbctl add 999700000000001 465B5CE8B199B49FAA5F0A2EE238A6BC E8ED289DEBA952E4283B54E88E6183CA"
 echo
-echo "tmux controls:"
-echo "  Ctrl-b w       list windows (one per NF)"
-echo "  Ctrl-b <n>     switch to window number n"
-echo "  Ctrl-b d       detach (leaves everything running)"
-echo "  tmux attach -t $SESSION   reattach later"
+echo "View all logs live:"
+echo "  sudo bash tools/start_5gc.sh --logs"
 echo
-echo "To stop everything:  sudo bash tools/stop_5gc.sh"
+echo "Check status:"
+echo "  sudo bash tools/start_5gc.sh --status"
 echo
-
-exec tmux attach -t "$SESSION"
+echo "Stop everything:"
+echo "  sudo bash tools/stop_5gc.sh"
+echo
