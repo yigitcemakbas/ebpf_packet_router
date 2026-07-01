@@ -338,8 +338,34 @@ int xdp_gtp_router(struct xdp_md *ctx)
 	__u32 opt_sz = 0;
 	if (gtph->flags & GTPU_OPT_FLAG_MASK) {
 		struct gtpu_opt *opt = CURSOR_ADVANCE(cursor, data_end, struct gtpu_opt);
-		(void)opt;
 		opt_sz = GTPU_OPTIONAL_SZ;
+
+		/* Walk GTP-U extension header chain. 5G NR mandates a PDU Session
+		 * Container (type 0x85) on every G-PDU: without this loop the cursor
+		 * stops at the extension header instead of the inner IP, and the
+		 * version-4 check below misfires on the length byte (0x01).
+		 * Each extension header: [length(1B)][body...][next_type(1B)],
+		 * total = length * 4 bytes. next_type == 0 means end of chain. */
+		__u8 next_ext = opt->next_ext;
+		#pragma unroll
+		for (int i = 0; i < 4; i++) {
+			if (next_ext == 0)
+				break;
+			__u8 *ext_len_p = (__u8 *)cursor;
+			if ((void *)(ext_len_p + 1) > data_end)
+				goto drop;
+			__u32 ext_sz = ((__u32)(*ext_len_p)) * 4;
+			if (ext_sz < 4)
+				goto drop;
+			__u8 *next_p = (__u8 *)cursor + ext_sz - 1;
+			if ((void *)(next_p + 1) > data_end)
+				goto drop;
+			next_ext = *next_p;
+			cursor += ext_sz;
+			opt_sz += ext_sz;
+			if (cursor > data_end)
+				goto drop;
+		}
 	}
 
 	struct iphdr *inner_iph = CURSOR_ADVANCE(cursor, data_end, struct iphdr);

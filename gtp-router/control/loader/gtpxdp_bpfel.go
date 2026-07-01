@@ -13,17 +13,26 @@ import (
 )
 
 type GtpXdpFwdRule struct {
-	Action     uint32
-	OutIfindex uint32
-	Dmac       [6]uint8
-	Smac       [6]uint8
-	TeidOut    uint32
-	DstIp      uint32
-	SrcIp      uint32
-	DstPort    uint16
-	Pad        [6]uint8
-	PktCount   uint64
-	ByteCount  uint64
+	Action              uint32
+	OutIfindex          uint32
+	Dmac                [6]uint8
+	Smac                [6]uint8
+	TeidOut             uint32
+	DstIp               uint32
+	SrcIp               uint32
+	DstPort             uint16
+	Pad                 [6]uint8
+	PktCount            uint64
+	ByteCount           uint64
+	RatePps             uint32
+	WindowCount         uint32
+	WindowStartNs       uint64
+	RateDropCount       uint64
+	ViolationStreak     uint32
+	QuarantineThreshold uint32
+	QuarantineSeconds   uint32
+	WindowViolated      uint32
+	QuarantineUntilNs   uint64
 }
 
 type GtpXdpGlobalStats struct {
