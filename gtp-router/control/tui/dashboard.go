@@ -10,7 +10,9 @@ package tui
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -26,18 +28,20 @@ import (
 // dashboard doesn't flash a "too narrow" notice for one frame on startup.
 const defaultWidth = 80
 
-// Width tiers for the rule panels. Columns deliberately omit DST MAC/SRC MAC
-// (static config already shown in full by `gtp-ctrl list`) even at full
-// width - the dashboard's job is the live counters, not re-displaying
-// config. DROPPED (rate-limit drops) is prioritized above BYTES, since
-// PACKETS+PPS already convey volume/rate and DROPPED is the differentiating
-// signal for the per-subscriber rate limiting feature - a standard 80-column
-// terminal lands in the medium tier, which keeps DROPPED and drops BYTES;
-// widen to 90+ columns to see BYTES too.
+// Width tiers for the forwarding rule panels (rate-limit/quarantine policy is
+// in its own Enforcement panel, so these tables stay narrow). Columns omit
+// DST MAC/SRC MAC (static config already shown in full by `gtp-ctrl list`) -
+// the dashboard's job is live counters, not re-displaying config. A standard
+// 80-column terminal lands in the full tier (key/ACTION/IFINDEX/PACKETS/
+// BYTES/PPS); narrower terminals drop BYTES.
 const (
-	fullWidthThreshold   = 90
+	fullWidthThreshold   = 78
 	mediumWidthThreshold = 60
 )
+
+// pingLogPath is where the dashboard-managed traffic ping writes; the lab's
+// traffic pane tails this file.
+const pingLogPath = "/tmp/gtp-lab-ping.log"
 
 // columnsFor returns the headers/widths for a rule panel's key column (TEID
 // or UE IP) at the given terminal width. tooNarrow is true when there isn't
@@ -115,9 +119,21 @@ func Run(interval time.Duration) error {
 	defer um.Close()
 
 	m := newModel(tm, um, interval)
+	m.pingTarget = envOr("PING_TARGET", "8.8.8.8")
+	m.pingInterval = envOr("PING_INTERVAL", "0.05")
+	m.pingSize = envOr("PING_SIZE", "64")
+	m.pingNetns = envOr("PING_NETNS", "ran")
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 // mode selects which of the three sub-views Update/View dispatch to.
@@ -127,6 +143,7 @@ const (
 	modeView uiMode = iota
 	modeForm
 	modeConfirmDelete
+	modeHelp
 )
 
 // panelFocus selects which rule panel keyboard navigation (Tab/Up/Down/
@@ -154,6 +171,13 @@ type model struct {
 
 	interval time.Duration
 	width    int
+
+	// dashboard-managed traffic ping (toggled with "p"); config from env.
+	pingOn       bool
+	pingTarget   string
+	pingInterval string
+	pingSize     string
+	pingNetns    string
 
 	mode  uiMode
 	focus panelFocus
@@ -232,9 +256,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateForm(msg)
 		case modeConfirmDelete:
 			return m.updateConfirmDelete(msg)
+		case modeHelp:
+			m.mode = modeView // any key dismisses the manual
+			return m, nil
 		default:
 			return m.updateView(msg)
 		}
+
+	case pingToggledMsg:
+		m.pingOn = msg.on
+		if msg.err != nil {
+			m.statusMsg = "ping: " + msg.err.Error()
+		} else if msg.on {
+			m.statusMsg = "ping started -> " + m.pingTarget + " (output in the traffic pane)"
+		} else {
+			m.statusMsg = "ping stopped"
+		}
+		m.statusUntil = time.Now().Add(4 * time.Second)
+		return m, nil
 
 	case copyResultMsg:
 		if msg.err != nil {
@@ -299,7 +338,29 @@ func clamp(v, lo, hi int) int {
 func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
+		if m.pingOn {
+			stopPingSync(m.pingTarget) // don't leave an orphaned ping behind
+		}
 		return m, tea.Quit
+
+	case "p":
+		if m.pingOn {
+			return m, stopPingCmd(m.pingTarget)
+		}
+		return m, startPingCmd(m.pingNetns, m.pingInterval, m.pingSize, m.pingTarget)
+
+	case "t":
+		if err := m.addDefaultRules(); err != nil {
+			m.err = err
+			return m, nil
+		}
+		m.statusMsg = "added default test rules (2 TEID, 1 UE-IP; two under policy)"
+		m.statusUntil = time.Now().Add(4 * time.Second)
+		return m, m.fetchCmd()
+
+	case "?", "h":
+		m.mode = modeHelp
+		return m, nil
 
 	case "tab":
 		if m.focus == focusTeid {
@@ -371,6 +432,60 @@ func copyCmd(content string) tea.Cmd {
 		fmt.Fprintf(os.Stdout, "\x1b]52;c;%s\x07", encoded) // best-effort; errors ignored
 		return copyResultMsg{path: snapshotPath}
 	}
+}
+
+// --- traffic ping (toggled with "p") -------------------------------------
+
+type pingToggledMsg struct {
+	on  bool
+	err error
+}
+
+// startPingCmd launches a background ping inside the RAN namespace, writing to
+// pingLogPath (the lab's traffic pane tails it). The ping is detached (`&` in
+// a shell) so it outlives this command; stopPingCmd/stopPingSync end it.
+func startPingCmd(ns, interval, size, target string) tea.Cmd {
+	return func() tea.Msg {
+		sh := fmt.Sprintf("ip netns exec %s ping -i %s -s %s %s >%s 2>&1 &",
+			ns, interval, size, target, pingLogPath)
+		if err := exec.Command("bash", "-c", sh).Run(); err != nil {
+			return pingToggledMsg{on: false, err: err}
+		}
+		return pingToggledMsg{on: true}
+	}
+}
+
+func stopPingCmd(target string) tea.Cmd {
+	return func() tea.Msg {
+		stopPingSync(target)
+		return pingToggledMsg{on: false}
+	}
+}
+
+// stopPingSync kills the ping started by startPingCmd, matched by its target
+// so it won't touch unrelated pings.
+func stopPingSync(target string) {
+	_ = exec.Command("pkill", "-f", "ping -i .* "+target).Run()
+}
+
+// addDefaultRules inserts a few example rules so the panels can be exercised
+// without live traffic. They use the "drop" action (needs no iface/MAC), and
+// two carry rate-limit/quarantine so the Enforcement panel populates too.
+func (m model) addDefaultRules() error {
+	if err := m.tm.Put(0xDEAD, &maps.FwdRule{Action: maps.ActionDrop}); err != nil {
+		return err
+	}
+	if err := m.tm.Put(0xBEEF, &maps.FwdRule{
+		Action: maps.ActionDrop, RatePPS: 5, QuarantineThreshold: 3, QuarantineSeconds: 30,
+	}); err != nil {
+		return err
+	}
+	if err := m.um.Put(net.ParseIP("10.45.0.99"), &maps.FwdRule{
+		Action: maps.ActionDrop, RatePPS: 10,
+	}); err != nil {
+		return err
+	}
+	return nil
 }
 
 // plainSnapshot renders the current dashboard state as plain ASCII text -
@@ -625,9 +740,47 @@ func (m model) View() string {
 		return m.renderForm()
 	case modeConfirmDelete:
 		return m.renderConfirm()
+	case modeHelp:
+		return m.renderHelp()
 	default:
 		return m.renderView()
 	}
+}
+
+func (m model) renderHelp() string {
+	body := `WHAT THIS IS
+  A per-subscriber view/edit surface over the XDP data plane. Unlike a normal
+  router (which sees GTP-U as opaque UDP/2152), this acts on an individual
+  subscriber by TEID or UE IP, in the kernel, before the network stack.
+
+PANELS
+  teid_map / ueip_map   forwarding rules (ACTION/IFINDEX/PACKETS/BYTES/PPS)
+  enforcement           per-subscriber rate-limit / quarantine policy:
+                        CAP=cap pps  DROPPED=dropped by cap  QUAR=thr/secs
+                        STATE=armed | HELD (currently blocked)
+  global verdict        PASS / DROP / REDIRECT totals
+
+KEYS
+  tab            switch focus between the teid and ueip panels
+  up/down (k/j)  move the selection in the focused panel
+  a              add a rule
+  e / enter      edit the selected rule (incl. its rate-limit/quarantine)
+  d / x          delete the selected rule
+  p              start / stop the traffic ping (output in the traffic pane)
+  t              add default test rules (populate the panels)
+  c              save a snapshot to /tmp/gtp-dashboard-snapshot.txt
+  ? / h          show this manual
+  q / ctrl+c     quit
+
+PACKET OPERATIONS (rule actions)
+  drop      discard the subscriber's traffic
+  decap     strip GTP-U, forward the inner packet
+  encap     wrap a bare packet in a fresh GTP-U tunnel
+  redirect  MAC-rewrite and send out another interface
+  plus rate-limit (cap pps) and quarantine (auto hard-block) on any rule
+
+Press any key to return.`
+	return panelStyle.Render(titleStyle.Render("GTP-U XDP Router - Manual") + "\n\n" + body)
 }
 
 func (m model) renderView() string {
@@ -636,6 +789,11 @@ func (m model) renderView() string {
 		header += fmt.Sprintf("   (refresh: %s, updated: %s)", m.interval, m.updatedAt.Format("15:04:05"))
 	} else {
 		header += "   (loading...)"
+	}
+	if m.pingOn {
+		header += "   ping: ON -> " + m.pingTarget
+	} else {
+		header += "   ping: off"
 	}
 
 	teidTitle, ueipTitle := "  teid_map", "  ueip_map"
@@ -653,7 +811,7 @@ func (m model) renderView() string {
 	enforcePanel := panelStyle.Render(titleStyle.Render("  enforcement (rate-limit / quarantine)") + "\n" + m.renderEnforcement())
 	statsPanel := panelStyle.Render(titleStyle.Render("global verdict counters") + "\n" + m.renderStats())
 
-	footer := footerStyle.Render("tab: switch panel   up/down: select   a: add   e: edit   d: delete   c: snapshot   q: quit")
+	footer := footerStyle.Render("tab: switch   up/down: select   a: add   e: edit   d: delete   p: ping   t: test rules   c: snapshot   ?: help   q: quit")
 	if time.Now().Before(m.statusUntil) {
 		footer = footerStyle.Render(m.statusMsg) + "\n" + footer
 	}

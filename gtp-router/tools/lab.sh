@@ -63,9 +63,15 @@ tmux kill-session -t "$SESSION" 2>/dev/null || true
 tmux new-session -d -s "$SESSION" -n control -x 220 -y 50
 tmux set-option -t "$SESSION" -g mouse on
 
-# window 0 'control': control shell (left) + dashboard (right, larger)
+PING_LOG=/tmp/gtp-lab-ping.log
+: > "$PING_LOG"
+
+# window 0 'control': control shell (left) + dashboard (right, larger).
+# The dashboard owns the traffic ping (started/stopped with "p"); it gets the
+# ping knobs via env so "p" pings the right target at the configured rate.
 tmux send-keys -t "$SESSION:control" "cd $REPO && EGRESS_IFACE=$EGRESS_IFACE source tools/lab_helpers.sh" C-m
-tmux split-window -h -p 65 -t "$SESSION:control" "cd $REPO && sudo ./build/gtp-ctrl dashboard"
+tmux split-window -h -p 65 -t "$SESSION:control" \
+  "cd $REPO && sudo PING_TARGET=$PING_TARGET PING_INTERVAL=$PING_INTERVAL PING_SIZE=$PING_SIZE PING_NETNS=$NETNS ./build/gtp-ctrl dashboard"
 
 # window 1 'gnb'
 tmux new-window -t "$SESSION" -n gnb \
@@ -75,9 +81,9 @@ tmux new-window -t "$SESSION" -n gnb \
 tmux new-window -t "$SESSION" -n ue \
   "cd $UERANSIM && until sudo ip netns exec $NETNS ss -uln 2>/dev/null | grep -q ':4997'; do sleep 1; done; sudo ip netns exec $NETNS ./build/nr-ue -c config/open5gs-ue.yaml"
 
-# window 3 'traffic' - waits for uesimtun0, then pings per ran.conf
+# window 3 'traffic' - tails the dashboard-managed ping log (start it with "p")
 tmux new-window -t "$SESSION" -n traffic \
-  "until sudo ip netns exec $NETNS ip link show uesimtun0 >/dev/null 2>&1; do sleep 1; done; echo '[traffic] uesimtun0 up, pinging $PING_TARGET'; sudo ip netns exec $NETNS ping -i $PING_INTERVAL -s $PING_SIZE $PING_TARGET"
+  "echo '[traffic] press p in the control window to start/stop the ping'; tail -F $PING_LOG"
 
 tmux select-window -t "$SESSION:control"
 
@@ -91,12 +97,13 @@ cat <<EOF
      0 control  - dashboard (right) + your command shell (left)
      1 gnb      - gNB log
      2 ue       - UE log (auto-starts after the gNB)
-     3 traffic  - the UE's ping (edit rate in tools/ran.conf)
+     3 traffic  - the UE's ping output (start it with "p"; rate in ran.conf)
 
+ In the dashboard pane:  p start/stop ping   t add test rules   ? manual
+                         a add  e edit  d delete   c snapshot   q quit
  In the control shell, drive the router with:
    showteid | decap | drop | redirect | ratelimit [pps]
    quarantine [pps] [thr] [secs] | clearrule
- or edit rules live in the dashboard pane (a: add  e: edit  d: delete).
 
  Tear down:  sudo bash tools/lab.sh --down
 ==================================================================
