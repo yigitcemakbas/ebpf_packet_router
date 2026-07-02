@@ -9,6 +9,33 @@ and N6-to-N3 data plane does. This is wiring, not development.
 Everything here targets this project's existing ARM64 Kali VM
 (`linux/arm64`, confirmed via `uname -m`).
 
+## Quick start (scripted)
+
+Once Open5GS and UERANSIM are built (sections 1-2) and a subscriber is
+registered (section 3), the entire lab is one command:
+
+```bash
+sudo bash tools/lab.sh
+```
+
+`lab.sh` brings up everything and drops you into a tmux "control room":
+infra + core + gNB + UE + the XDP router + the live dashboard + a traffic
+ping, all auto-started. In the control pane, drive the router with the verbs
+`showteid | decap | drop | redirect | ratelimit [pps] |
+quarantine [pps] [thr] [secs] | clearrule`, or edit rules live in the
+dashboard pane (`a` add, `e` edit, `d` delete). Tunables (ping target/rate,
+egress interface) live in `tools/ran.conf`. Tear down with
+`sudo bash tools/lab.sh --down`.
+
+Under the hood `lab.sh` calls `tools/setup_ran.sh`, which encodes every
+single-host fix this integration needs and which are NON-PERSISTENT (wiped by
+a reboot): the `ran` network namespace + veth, the AMF-NGAP / UPF-N3 rebind
+onto that veth, and `ogstun` + NAT + IP forwarding. If you only want the
+infra (no tmux), run `sudo bash tools/setup_ran.sh` on its own.
+
+The manual sequence below documents what those scripts automate, for
+understanding and troubleshooting.
+
 ## Why Open5GS instead of free5gc
 
 free5gc's official Docker deployment (`free5gc-compose`) ships

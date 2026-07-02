@@ -42,25 +42,25 @@ const (
 // columnsFor returns the headers/widths for a rule panel's key column (TEID
 // or UE IP) at the given terminal width. tooNarrow is true when there isn't
 // enough room for any table layout, in which case the caller should show a
-// plain notice instead of attempting to render columns. IFINDEX/PACKETS/PPS
-// were trimmed from their original widths to make room for Q (quarantine
-// status) without re-triggering the overflow that DST MAC/SRC MAC caused
-// originally - values realistically never need the old widths.
+// plain notice instead of attempting to render columns. These rule tables are
+// forwarding-focused: rate-limit/quarantine policy lives in its own
+// Enforcement panel (renderEnforcement), so nothing here competes for width
+// and BYTES can stay in the full tier.
 func columnsFor(width int, keyLabel string, keyWidth int) (headers []string, widths []int, tooNarrow bool) {
 	switch {
 	case width >= fullWidthThreshold:
-		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "BYTES", "PPS", "DROPPED", "Q"},
-			[]int{keyWidth, 10, 5, 8, 10, 7, 8, 3}, false
+		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "BYTES", "PPS"},
+			[]int{keyWidth, 10, 5, 8, 10, 7}, false
 	case width >= mediumWidthThreshold:
-		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "PPS", "DROPPED", "Q"},
-			[]int{keyWidth, 10, 5, 8, 7, 8, 3}, false
+		return []string{keyLabel, "ACTION", "IFINDEX", "PACKETS", "PPS"},
+			[]int{keyWidth, 10, 5, 8, 7}, false
 	default:
 		return nil, nil, true
 	}
 }
 
-// dropColumn removes column idx from every row, used when a narrower layout
-// drops BYTES (index 4 in the full row produced by buildRows) without
+// dropColumn removes column idx from every row, used when the medium-width
+// layout drops BYTES (index 4 in the row produced by buildRows) without
 // needing buildRows itself to know about rendering width.
 func dropColumn(rows [][]string, idx int) [][]string {
 	out := make([][]string, len(rows))
@@ -389,6 +389,10 @@ func (m model) plainSnapshot() string {
 	b.WriteString(m.renderPanel("UE IP", 15, m.ueipRows, -1))
 	b.WriteString("\n")
 
+	b.WriteString("enforcement (rate-limit / quarantine)\n")
+	b.WriteString(m.renderEnforcement())
+	b.WriteString("\n")
+
 	b.WriteString("global verdict counters\n")
 	b.WriteString(m.renderStats())
 
@@ -471,14 +475,18 @@ func (m model) renderConfirm() string {
 	return panelStyle.Render(titleStyle.Render("Confirm delete") + "\n\n" + body)
 }
 
-// quarantineMarker is a terse "Q"/"-" flag for the live table (full detail -
-// remaining seconds - is in `gtp-ctrl list`'s QUARANTINE column and the
-// snapshot). QuarantineUntilNs is a bpf_ktime_get_ns() (CLOCK_MONOTONIC)
-// deadline set by the XDP program, so it's compared against
+// enforcementState summarizes a rule's quarantine posture for the Enforcement
+// panel: "HELD" while actively quarantined, "armed" when quarantine is
+// configured but not currently tripped, "-" when no quarantine is set (e.g. a
+// rate-limit-only rule). QuarantineUntilNs is a bpf_ktime_get_ns()
+// (CLOCK_MONOTONIC) deadline set by the XDP program, so it's compared against
 // maps.MonotonicNowNs(), not time.Now() (wall-clock; wrong clock domain).
-func quarantineMarker(r *maps.FwdRule) string {
+func enforcementState(r *maps.FwdRule) string {
 	if r.QuarantineUntilNs != 0 && maps.MonotonicNowNs() < r.QuarantineUntilNs {
-		return "Q"
+		return "HELD"
+	}
+	if r.QuarantineThreshold > 0 {
+		return "armed"
 	}
 	return "-"
 }
@@ -519,11 +527,48 @@ func buildRows(curr, prev map[uint32]*maps.FwdRule, elapsed float64, havePrev bo
 			fmt.Sprintf("%d", r.PktCount),
 			maps.FormatBytes(r.ByteCount),
 			fmt.Sprintf("%.1f/s", p),
-			fmt.Sprintf("%d", r.RateDropCount),
-			quarantineMarker(r),
 		})
 	}
 	return keys, rows
+}
+
+// enforcementRows builds the Enforcement panel's rows: every rule (from either
+// map) that has a rate cap or a quarantine configured, in TEID-then-UEIP order.
+// It reads the raw rules (not the pre-rendered forwarding rows) so it can show
+// the configured policy - CAP and QUAR threshold/timer - not just its effects.
+func enforcementRows(teid, ueip map[uint32]*maps.FwdRule) [][]string {
+	rows := [][]string{}
+	collect := func(m map[uint32]*maps.FwdRule, keyFmt func(uint32) string) {
+		keys := make([]uint32, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+		for _, k := range keys {
+			r := m[k]
+			if r.RatePPS == 0 && r.QuarantineThreshold == 0 {
+				continue
+			}
+			capStr := "-"
+			if r.RatePPS > 0 {
+				capStr = fmt.Sprintf("%d/s", r.RatePPS)
+			}
+			quar := "-"
+			if r.QuarantineThreshold > 0 {
+				quar = fmt.Sprintf("%d/%ds", r.QuarantineThreshold, r.QuarantineSeconds)
+			}
+			rows = append(rows, []string{
+				keyFmt(k),
+				capStr,
+				fmt.Sprintf("%d", r.RateDropCount),
+				quar,
+				enforcementState(r),
+			})
+		}
+	}
+	collect(teid, formatTEID)
+	collect(ueip, formatUEIP)
+	return rows
 }
 
 // renderTable formats headers and rows as fixed-width, left-justified plain
@@ -605,6 +650,7 @@ func (m model) renderView() string {
 
 	teidPanel := panelStyle.Render(titleStyle.Render(teidTitle) + "\n" + m.renderPanel("TEID", 12, m.teidRows, teidSel))
 	ueipPanel := panelStyle.Render(titleStyle.Render(ueipTitle) + "\n" + m.renderPanel("UE IP", 15, m.ueipRows, ueipSel))
+	enforcePanel := panelStyle.Render(titleStyle.Render("  enforcement (rate-limit / quarantine)") + "\n" + m.renderEnforcement())
 	statsPanel := panelStyle.Render(titleStyle.Render("global verdict counters") + "\n" + m.renderStats())
 
 	footer := footerStyle.Render("tab: switch panel   up/down: select   a: add   e: edit   d: delete   c: snapshot   q: quit")
@@ -612,7 +658,7 @@ func (m model) renderView() string {
 		footer = footerStyle.Render(m.statusMsg) + "\n" + footer
 	}
 
-	return header + "\n\n" + teidPanel + "\n" + ueipPanel + "\n" + statsPanel + "\n\n" + footer
+	return header + "\n\n" + teidPanel + "\n" + ueipPanel + "\n" + enforcePanel + "\n" + statsPanel + "\n\n" + footer
 }
 
 // renderPanel picks the column set for the current terminal width and
@@ -623,10 +669,25 @@ func (m model) renderPanel(keyLabel string, keyWidth int, rows [][]string, selec
 	if tooNarrow {
 		return "(terminal too narrow for table view - resize to at least 60 columns)"
 	}
-	if len(headers) == 7 {
-		rows = dropColumn(rows, 4) // full row is [key, action, ifindex, packets, bytes, pps, dropped, q]; drop bytes
+	if len(headers) == 5 {
+		rows = dropColumn(rows, 4) // full row is [key, action, ifindex, packets, bytes, pps]; medium drops bytes
 	}
 	return renderTable(headers, widths, rows, selected)
+}
+
+// renderEnforcement renders the Enforcement panel - the per-subscriber
+// rate-limit / quarantine policy that a normal router cannot express. It is a
+// read-only status view; edits happen on the subscriber's rule (a/e in the
+// rule panels, or the ratelimit/quarantine control-plane verbs), since policy
+// is an attribute of the rule, not a separate object.
+func (m model) renderEnforcement() string {
+	rows := enforcementRows(m.lastTeid, m.lastUeip)
+	if len(rows) == 0 {
+		return "  (no rate-limit or quarantine policy set)"
+	}
+	headers := []string{"SUBSCRIBER", "CAP", "DROPPED", "QUAR", "STATE"}
+	widths := []int{15, 8, 8, 10, 6}
+	return renderTable(headers, widths, rows, -1)
 }
 
 func (m model) renderStats() string {
