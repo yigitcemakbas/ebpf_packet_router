@@ -21,7 +21,8 @@ type GtpXdpFwdRule struct {
 	DstIp               uint32
 	SrcIp               uint32
 	DstPort             uint16
-	Pad                 [6]uint8
+	Pad                 [2]uint8
+	NatIp               uint32
 	PktCount            uint64
 	ByteCount           uint64
 	RatePps             uint32
@@ -88,6 +89,7 @@ type GtpXdpProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type GtpXdpMapSpecs struct {
+	NatMap   *ebpf.MapSpec `ebpf:"nat_map"`
 	StatsMap *ebpf.MapSpec `ebpf:"stats_map"`
 	TeidMap  *ebpf.MapSpec `ebpf:"teid_map"`
 	UeipMap  *ebpf.MapSpec `ebpf:"ueip_map"`
@@ -112,6 +114,7 @@ func (o *GtpXdpObjects) Close() error {
 //
 // It can be passed to LoadGtpXdpObjects or ebpf.CollectionSpec.LoadAndAssign.
 type GtpXdpMaps struct {
+	NatMap   *ebpf.Map `ebpf:"nat_map"`
 	StatsMap *ebpf.Map `ebpf:"stats_map"`
 	TeidMap  *ebpf.Map `ebpf:"teid_map"`
 	UeipMap  *ebpf.Map `ebpf:"ueip_map"`
@@ -119,6 +122,7 @@ type GtpXdpMaps struct {
 
 func (m *GtpXdpMaps) Close() error {
 	return _GtpXdpClose(
+		m.NatMap,
 		m.StatsMap,
 		m.TeidMap,
 		m.UeipMap,

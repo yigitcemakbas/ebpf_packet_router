@@ -10,11 +10,13 @@ import (
 )
 
 const (
-	PinDir      = "/sys/fs/bpf/gtp_router"
-	PinTeidMap  = PinDir + "/teid_map"
-	PinUeipMap  = PinDir + "/ueip_map"
-	PinStatsMap = PinDir + "/stats_map"
-	PinProg     = PinDir + "/xdp_prog"
+	PinDir          = "/sys/fs/bpf/gtp_router"
+	PinTeidMap      = PinDir + "/teid_map"
+	PinUeipMap      = PinDir + "/ueip_map"
+	PinNatMap       = PinDir + "/nat_map"
+	PinStatsMap     = PinDir + "/stats_map"
+	PinProg         = PinDir + "/xdp_prog"
+	PinProgDownlink = PinDir + "/xdp_prog_dl"
 )
 
 type TeidMap struct{ m *ebpf.Map }
@@ -143,6 +145,73 @@ func (u *UeipMap) List() (map[uint32]*FwdRule, error) {
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("ueip_map iterate: %w", err)
+	}
+	return out, nil
+}
+
+type NatMap struct{ m *ebpf.Map }
+
+func OpenNatMap() (*NatMap, error) {
+	m, err := ebpf.LoadPinnedMap(PinNatMap, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open nat_map: %w", err)
+	}
+	return &NatMap{m: m}, nil
+}
+
+func NewNatMap(m *ebpf.Map) *NatMap { return &NatMap{m: m} }
+func (n *NatMap) Close()            { n.m.Close() }
+
+func (n *NatMap) Put(natIP net.IP, rule *FwdRule) error {
+	key, err := ipKey(natIP)
+	if err != nil {
+		return err
+	}
+	if err := n.m.Put(key, rule); err != nil {
+		return fmt.Errorf("nat_map put %s: %w", natIP, err)
+	}
+	return nil
+}
+
+func (n *NatMap) Delete(natIP net.IP) error {
+	key, err := ipKey(natIP)
+	if err != nil {
+		return err
+	}
+	err = n.m.Delete(key)
+	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("nat_map delete %s: %w", natIP, err)
+	}
+	return nil
+}
+
+func (n *NatMap) Get(natIP net.IP) (*FwdRule, error) {
+	key, err := ipKey(natIP)
+	if err != nil {
+		return nil, err
+	}
+	var rule FwdRule
+	err = n.m.Lookup(key, &rule)
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("nat_map lookup %s: %w", natIP, err)
+	}
+	return &rule, nil
+}
+
+func (n *NatMap) List() (map[uint32]*FwdRule, error) {
+	out := make(map[uint32]*FwdRule)
+	var key uint32
+	var rule FwdRule
+	iter := n.m.Iterate()
+	for iter.Next(&key, &rule) {
+		r := rule
+		out[key] = &r
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("nat_map iterate: %w", err)
 	}
 	return out, nil
 }

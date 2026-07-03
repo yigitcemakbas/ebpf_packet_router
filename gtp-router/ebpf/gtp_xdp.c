@@ -4,6 +4,7 @@
 
 #include <linux/if_ether.h>
 #include <linux/ip.h>
+#include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/in.h>
 
@@ -43,6 +44,15 @@ struct {
 	__type(key, __be32);
 	__type(value, struct fwd_rule);
 } ueip_map SEC(".maps");
+
+/* Keyed by NAT IP (host byte order, same convention as ueip_map).
+ * Used on eth0 ingress: dst == NAT IP → rewrite dst to UE IP + GTP-U encap. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_NAT_ENTRIES);
+	__type(key, __u32);
+	__type(value, struct fwd_rule);
+} nat_map SEC(".maps");
 
 struct global_stats {
 	__u64 packets;
@@ -143,6 +153,97 @@ static __always_inline int enforce_policy(struct fwd_rule *rule)
 	return 0;
 }
 
+/* Incrementally update a ones-complement checksum (RFC 1624) after replacing
+ * one 32-bit field. old_val and new_val must be in HOST byte order — this is
+ * the storage convention for all IP address fields in struct fwd_rule. */
+static __always_inline void csum_update_u32(__sum16 *check, __u32 old_val, __u32 new_val)
+{
+	__u32 sum = (~bpf_ntohs(*check)) & 0xffff;
+	sum += (~(old_val >> 16)) & 0xffff;
+	sum += (~(old_val & 0xffff)) & 0xffff;
+	sum += (new_val >> 16);
+	sum += (new_val & 0xffff);
+	sum = (sum >> 16) + (sum & 0xffff);
+	sum = (sum >> 16) + (sum & 0xffff);
+	*check = bpf_htons((__u16)(~sum & 0xffff));
+}
+
+/* Rewrite the source IP of the inner (already-decapped) IPv4 packet at
+ * [data, data_end) from ue_ip_host to nat_ip_host, fixing IP and L4
+ * checksums. Both values are in host byte order. */
+static __always_inline int nat_src_rewrite(void *data, void *data_end,
+					    __u32 ue_ip_host, __u32 nat_ip_host)
+{
+	struct ethhdr *eth = (struct ethhdr *)data;
+	if ((void *)(eth + 1) > data_end)
+		return -1;
+	struct iphdr *iph = (struct iphdr *)(eth + 1);
+	if ((void *)(iph + 1) > data_end)
+		return -1;
+	if (iph->version != 4)
+		return -1;
+
+	iph->saddr = bpf_htonl(nat_ip_host);
+	csum_update_u32(&iph->check, ue_ip_host, nat_ip_host);
+
+	__u32 ihl = (__u32)(iph->ihl & 0xf) * 4;
+	if (ihl < 20)
+		return -1;
+
+	if (iph->protocol == IPPROTO_TCP) {
+		struct tcphdr *tcp = (struct tcphdr *)((void *)iph + ihl);
+		if ((void *)(tcp + 1) > data_end)
+			return -1;
+		if (tcp->check)
+			csum_update_u32(&tcp->check, ue_ip_host, nat_ip_host);
+	} else if (iph->protocol == IPPROTO_UDP) {
+		struct udphdr *udp = (struct udphdr *)((void *)iph + ihl);
+		if ((void *)(udp + 1) > data_end)
+			return -1;
+		if (udp->check)
+			csum_update_u32(&udp->check, ue_ip_host, nat_ip_host);
+	}
+	/* ICMP: no IP addresses in pseudo-header, so no L4 checksum update needed. */
+	return 0;
+}
+
+/* Rewrite the destination IP of a bare IPv4 packet at [data, data_end) from
+ * nat_ip_host to ue_ip_host, fixing IP and L4 checksums. */
+static __always_inline int nat_dst_rewrite(void *data, void *data_end,
+					    __u32 nat_ip_host, __u32 ue_ip_host)
+{
+	struct ethhdr *eth = (struct ethhdr *)data;
+	if ((void *)(eth + 1) > data_end)
+		return -1;
+	struct iphdr *iph = (struct iphdr *)(eth + 1);
+	if ((void *)(iph + 1) > data_end)
+		return -1;
+	if (iph->version != 4)
+		return -1;
+
+	iph->daddr = bpf_htonl(ue_ip_host);
+	csum_update_u32(&iph->check, nat_ip_host, ue_ip_host);
+
+	__u32 ihl = (__u32)(iph->ihl & 0xf) * 4;
+	if (ihl < 20)
+		return -1;
+
+	if (iph->protocol == IPPROTO_TCP) {
+		struct tcphdr *tcp = (struct tcphdr *)((void *)iph + ihl);
+		if ((void *)(tcp + 1) > data_end)
+			return -1;
+		if (tcp->check)
+			csum_update_u32(&tcp->check, nat_ip_host, ue_ip_host);
+	} else if (iph->protocol == IPPROTO_UDP) {
+		struct udphdr *udp = (struct udphdr *)((void *)iph + ihl);
+		if ((void *)(udp + 1) > data_end)
+			return -1;
+		if (udp->check)
+			csum_update_u32(&udp->check, nat_ip_host, ue_ip_host);
+	}
+	return 0;
+}
+
 static __always_inline void rewrite_eth(struct ethhdr *eth, const struct fwd_rule *rule)
 {
 	__builtin_memcpy(eth->h_dest, rule->dmac, ETH_ALEN);
@@ -178,10 +279,16 @@ static __always_inline int decap_gtpu(struct xdp_md *ctx,
 	return 0;
 }
 
-/* GTP-U encapsulation overhead prepended to a downlink packet:
- * outer IP (20) + UDP (8) + GTP-U (8) = 36 bytes. */
+/* GTP-U encapsulation overhead for the legacy (non-5G) path:
+ * outer IP (20) + UDP (8) + GTP-U mandatory (8) = 36 bytes. */
 #define ENCAP_OVERHEAD (sizeof(struct iphdr) + sizeof(struct udphdr) \
 			+ sizeof(struct gtpuhdr))
+
+/* GTP-U encapsulation overhead for the 5G NR path (flags=0x34):
+ * outer IP (20) + UDP (8) + GTP-U mandatory (8) + optional (4) +
+ * PDU Session Container extension (4) = 44 bytes. */
+#define ENCAP_5G_OVERHEAD (sizeof(struct iphdr) + sizeof(struct udphdr) \
+			   + sizeof(struct gtpuhdr) + sizeof(struct gtpu_opt) + 4)
 
 /* Wrap a bare inner IPv4 packet in a fresh GTP-U tunnel described by @rule and
  * leave it ready for bpf_redirect(rule->out_ifindex). Returns 0 on success,
@@ -265,31 +372,153 @@ static __always_inline int encap_gtpu(struct xdp_md *ctx, const struct fwd_rule 
 	return 0;
 }
 
-/* Downlink fast path: if @ue_dst matches a UE rule whose action is ENCAP_FWD,
- * wrap the packet in GTP-U and redirect it toward the gNB; otherwise pass it. */
-static __always_inline int try_encap(struct xdp_md *ctx, __be32 ue_dst, __u64 pkt_len)
+/* 5G NR downlink encap: same as encap_gtpu but uses flags=0x34 (E=1) and
+ * appends optional fields + PDU Session Container extension header (type 0x85),
+ * as required by the gNB in the live 5G session. */
+static __always_inline int encap_gtpu_5g(struct xdp_md *ctx, const struct fwd_rule *rule)
 {
-	__u32 key = bpf_ntohl(ue_dst);
-	struct fwd_rule *rule = bpf_map_lookup_elem(&ueip_map, &key);
-	if (!rule || rule->action != FWD_ACTION_ENCAP_FWD) {
-		bump_stats(STAT_PASS, pkt_len);
-		return XDP_PASS;
+	void *data     = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
+
+	struct ethhdr *eth0 = data;
+	if ((void *)(eth0 + 1) > data_end)
+		return -1;
+	struct iphdr *inner = (struct iphdr *)(eth0 + 1);
+	if ((void *)(inner + 1) > data_end)
+		return -1;
+	__u16 inner_tot = bpf_ntohs(inner->tot_len);
+
+	if (bpf_xdp_adjust_head(ctx, -(int)ENCAP_5G_OVERHEAD))
+		return -1;
+
+	data     = (void *)(long)ctx->data;
+	data_end = (void *)(long)ctx->data_end;
+	if (data + sizeof(struct ethhdr) + ENCAP_5G_OVERHEAD > data_end)
+		return -1;
+
+	struct ethhdr *eth = data;
+	__builtin_memcpy(eth->h_dest, rule->dmac, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, rule->smac, ETH_ALEN);
+	eth->h_proto = bpf_htons(ETH_P_IP);
+
+	__u32 sip = (__u32)rule->src_ip;
+	__u32 dip = (__u32)rule->dst_ip;
+
+	struct iphdr *oip = (struct iphdr *)(eth + 1);
+	oip->version  = 4;
+	oip->ihl      = 5;
+	oip->tos      = 0;
+	oip->tot_len  = bpf_htons((__u16)(inner_tot + ENCAP_5G_OVERHEAD));
+	oip->id       = 0;
+	oip->frag_off = 0;
+	oip->ttl      = 64;
+	oip->protocol = IPPROTO_UDP;
+	oip->saddr    = bpf_htonl(sip);
+	oip->daddr    = bpf_htonl(dip);
+
+	{
+		__u32 csum = 0x4500
+			   + (__u32)(__u16)(inner_tot + ENCAP_5G_OVERHEAD)
+			   + 0x4011
+			   + (sip >> 16) + (sip & 0xffff)
+			   + (dip >> 16) + (dip & 0xffff);
+		csum = (csum & 0xffff) + (csum >> 16);
+		csum = (csum & 0xffff) + (csum >> 16);
+		oip->check = bpf_htons((__u16)~csum);
 	}
 
-	if (enforce_policy(rule)) {
+	__u16 udp_payload = (__u16)(inner_tot + sizeof(struct udphdr)
+				    + sizeof(struct gtpuhdr)
+				    + sizeof(struct gtpu_opt) + 4);
+	struct udphdr *udp = (struct udphdr *)(oip + 1);
+	udp->source = bpf_htons(GTP_UDP_PORT);
+	udp->dest   = bpf_htons(GTP_UDP_PORT);
+	udp->len    = bpf_htons(udp_payload);
+	udp->check  = 0;
+
+	/* GTP-U mandatory header: flags=0x34 (version 1, PT=1, E=1). */
+	struct gtpuhdr *gtp = (struct gtpuhdr *)(udp + 1);
+	gtp->flags    = GTP_VERSION_1 | GTP_PT_BIT | 0x04; /* 0x34 */
+	gtp->msg_type = GTPU_MSG_GPDU;
+	gtp->length   = bpf_htons((__u16)(inner_tot + sizeof(struct gtpu_opt) + 4));
+	gtp->teid     = bpf_htonl(rule->teid_out);
+
+	/* Optional fields (required when E=1): seq=0, n_pdu=0, next_ext=0x85. */
+	struct gtpu_opt *opt = (struct gtpu_opt *)(gtp + 1);
+	opt->seq_num  = 0;
+	opt->n_pdu    = 0;
+	opt->next_ext = 0x85; /* PDU Session Container */
+
+	/* PDU Session Container extension header: length=1 (4 bytes total),
+	 * content=DL PDU Session Info (type 0, spare 0), next=0. */
+	__u8 *ext = (__u8 *)(opt + 1);
+	ext[0] = 0x01; /* length field: 1 × 4 = 4 bytes */
+	ext[1] = 0x00; /* PDU Session Container type: DL (bit7=0) */
+	ext[2] = 0x00; /* spare */
+	ext[3] = 0x00; /* next extension type: none */
+
+	return 0;
+}
+
+/* Downlink fast path.  Two map checks in priority order:
+ *
+ * 1. nat_map: packet arrived on eth0 with dst == NAT IP.  Rewrite dst back to
+ *    the UE IP (stored in rule->nat_ip), then GTP-U encap toward the gNB.
+ *
+ * 2. ueip_map: packet arrived on veth-ran (non-GTP) whose dst is a known UE
+ *    IP; wrap it directly in a GTP-U tunnel toward the gNB (existing path).
+ *
+ * If neither map matches, pass to the kernel stack (SSH, ARP, etc.). */
+static __always_inline int try_encap(struct xdp_md *ctx, __be32 pkt_dst, __u64 pkt_len)
+{
+	__u32 key = bpf_ntohl(pkt_dst);  /* host byte order, same as map keys */
+
+	/* --- nat_map: eth0 downlink (NAT IP → UE IP + GTP-U encap) --- */
+	{
+		struct fwd_rule *nr = bpf_map_lookup_elem(&nat_map, &key);
+		if (nr && nr->action == FWD_ACTION_ENCAP_FWD) {
+			if (enforce_policy(nr)) {
+				bump_rule(nr, pkt_len);
+				bump_stats(STAT_DROP, pkt_len);
+				return XDP_DROP;
+			}
+			void *data    = (void *)(long)ctx->data;
+			void *data_end = (void *)(long)ctx->data_end;
+			/* nr->nat_ip holds the UE IP to restore as inner dst */
+			if (nat_dst_rewrite(data, data_end, key, nr->nat_ip) < 0) {
+				bump_stats(STAT_DROP, pkt_len);
+				return XDP_DROP;
+			}
+			if (encap_gtpu_5g(ctx, nr) < 0) {
+				bump_stats(STAT_DROP, pkt_len);
+				return XDP_DROP;
+			}
+			bump_rule(nr, pkt_len);
+			bump_stats(STAT_REDIRECT, pkt_len);
+			return bpf_redirect(nr->out_ifindex, 0);
+		}
+	}
+
+	/* --- ueip_map: veth-ran non-GTP downlink (existing path) --- */
+	{
+		struct fwd_rule *rule = bpf_map_lookup_elem(&ueip_map, &key);
+		if (!rule || rule->action != FWD_ACTION_ENCAP_FWD) {
+			bump_stats(STAT_PASS, pkt_len);
+			return XDP_PASS;
+		}
+		if (enforce_policy(rule)) {
+			bump_rule(rule, pkt_len);
+			bump_stats(STAT_DROP, pkt_len);
+			return XDP_DROP;
+		}
+		if (encap_gtpu(ctx, rule) < 0) {
+			bump_stats(STAT_DROP, pkt_len);
+			return XDP_DROP;
+		}
 		bump_rule(rule, pkt_len);
-		bump_stats(STAT_DROP, pkt_len);
-		return XDP_DROP;
+		bump_stats(STAT_REDIRECT, pkt_len);
+		return bpf_redirect(rule->out_ifindex, 0);
 	}
-
-	if (encap_gtpu(ctx, rule) < 0) {
-		bump_stats(STAT_DROP, pkt_len);
-		return XDP_DROP;
-	}
-
-	bump_rule(rule, pkt_len);
-	bump_stats(STAT_REDIRECT, pkt_len);
-	return bpf_redirect(rule->out_ifindex, 0);
 }
 
 SEC("xdp")
@@ -375,6 +604,8 @@ int xdp_gtp_router(struct xdp_md *ctx)
 	/* ueip_map is keyed by the UE IP in host byte order (matching the Go
 	 * control plane), so convert the inner destination before lookup. */
 	__u32 ue_ip = bpf_ntohl(inner_iph->daddr);
+	/* Save inner src before any adjust_head invalidates these pointers. */
+	__u32 saved_inner_src = bpf_ntohl(inner_iph->saddr);
 
 	struct fwd_rule *rule = bpf_map_lookup_elem(&teid_map, &teid);
 	if (!rule) {
@@ -400,6 +631,16 @@ int xdp_gtp_router(struct xdp_md *ctx)
 
 		if (decap_gtpu(ctx, rule, strip) < 0)
 			goto drop;
+
+		/* Static 1:1 NAT: rewrite inner src IP if configured.
+		 * All data/data_end pointers were invalidated by adjust_head
+		 * inside decap_gtpu, so re-derive them from ctx here. */
+		if (rule->nat_ip != 0) {
+			void *d  = (void *)(long)ctx->data;
+			void *de = (void *)(long)ctx->data_end;
+			if (nat_src_rewrite(d, de, saved_inner_src, rule->nat_ip) < 0)
+				goto drop;
+		}
 
 		bump_rule(rule, pkt_len);
 		bump_stats(STAT_REDIRECT, pkt_len);
