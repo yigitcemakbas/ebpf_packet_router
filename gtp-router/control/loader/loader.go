@@ -52,6 +52,7 @@ func Load(uplinkIface string, uplinkMode link.XDPAttachFlags,
 		{maps.PinUeipMap,  objs.UeipMap.Pin},
 		{maps.PinNatMap,   objs.NatMap.Pin},
 		{maps.PinStatsMap, objs.StatsMap.Pin},
+		{maps.PinTxPort,   objs.TxPort.Pin},
 	}
 	for _, p := range pins {
 		_ = os.Remove(p.path)
@@ -78,13 +79,38 @@ func Load(uplinkIface string, uplinkMode link.XDPAttachFlags,
 
 	fmt.Printf("[loader] attached to %s (ifindex=%d, mode=%v)\n", uplinkIface, iface.Index, uplinkMode)
 
+	// Provision the devmap for this interface: downlink rules redirect frames
+	// back out the uplink iface (GTP-U encap toward the gNB), so its ifindex
+	// must be a valid bpf_redirect_map() target.
+	txp := maps.NewTxPortMap(objs.TxPort)
+	if err := txp.Ensure(uint32(iface.Index)); err != nil {
+		_ = xdpLink.Unpin()
+		xdpLink.Close()
+		objs.Close()
+		return nil, fmt.Errorf("tx_port provision %s: %w", uplinkIface, err)
+	}
+
 	l := &Loader{objs: objs, xdp: xdpLink, iface: iface}
 
 	if dlIface != "" {
+		// On any failure from here on, unpin the uplink link before closing:
+		// the pin would otherwise keep the program attached after this process
+		// exits, and every retry would fail with "device or resource busy".
+		cleanup := func() {
+			_ = xdpLink.Unpin()
+			l.Close()
+		}
 		dlIf, err := net.InterfaceByName(dlIface)
 		if err != nil {
-			l.Close()
+			cleanup()
 			return nil, fmt.Errorf("downlink interface %q: %w", dlIface, err)
+		}
+		// Uplink rules redirect decapped frames out the downlink iface (to the
+		// internet), so its ifindex must be a valid redirect target. Provision
+		// it before attaching so this failure path can't leak a pinned link.
+		if err := txp.Ensure(uint32(dlIf.Index)); err != nil {
+			cleanup()
+			return nil, fmt.Errorf("tx_port provision %s: %w", dlIface, err)
 		}
 		xdpDL, err := link.AttachXDP(link.XDPOptions{
 			Program:   objs.XdpGtpRouter,
@@ -92,7 +118,7 @@ func Load(uplinkIface string, uplinkMode link.XDPAttachFlags,
 			Flags:     dlMode,
 		})
 		if err != nil {
-			l.Close()
+			cleanup()
 			return nil, fmt.Errorf("attach XDP to downlink %s: %w", dlIface, err)
 		}
 		_ = os.Remove(maps.PinProgDownlink)
@@ -123,7 +149,7 @@ func Unload(ifaceName string) error {
 
 	for _, p := range []string{
 		maps.PinTeidMap, maps.PinUeipMap, maps.PinNatMap,
-		maps.PinStatsMap, maps.PinProg, maps.PinProgDownlink,
+		maps.PinStatsMap, maps.PinTxPort, maps.PinProg, maps.PinProgDownlink,
 	} {
 		_ = os.Remove(p)
 	}

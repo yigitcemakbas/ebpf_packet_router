@@ -7,6 +7,8 @@ ROOT      := $(abspath .)
 OUT_DIR  := build
 BPF_SRC  := ebpf/gtp_xdp.c
 BPF_OBJ  := $(OUT_DIR)/gtp_xdp.o
+PASS_SRC := ebpf/xdp_pass.c
+PASS_OBJ := $(OUT_DIR)/xdp_pass.o
 GTP_CTRL := $(OUT_DIR)/gtp-ctrl
 
 GENERATED := control/loader/gtpxdp_bpfel.go
@@ -30,13 +32,20 @@ XDP_MODE ?= native
 # Full build: C → bpf2go → Go binary
 all: ebpf generate build
 
-# Step 1: compile the BPF C program to a BPF ELF object
-ebpf: $(BPF_OBJ)
+# Step 1: compile the BPF C programs to BPF ELF objects
+ebpf: $(BPF_OBJ) $(PASS_OBJ)
 
 $(BPF_OBJ): $(BPF_SRC) include/gtp_router.h
 	mkdir -p $(OUT_DIR)
 	clang $(BPF_CFLAGS) -c $(BPF_SRC) -o $(BPF_OBJ)
 	@echo "BPF object: $(BPF_OBJ)"
+
+# Pass-through stub attached to the receiving veth peers so native XDP redirect
+# is actually delivered across the veth pair (see ebpf/xdp_pass.c).
+$(PASS_OBJ): $(PASS_SRC)
+	mkdir -p $(OUT_DIR)
+	clang $(BPF_CFLAGS) -c $(PASS_SRC) -o $(PASS_OBJ)
+	@echo "BPF object: $(PASS_OBJ)"
 
 # bpf2go may run clang from a different working directory than the Makefile,
 # so use absolute include paths (relative -I../include breaks asm/types.h lookup).

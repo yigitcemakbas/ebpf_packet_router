@@ -15,6 +15,7 @@ const (
 	PinUeipMap      = PinDir + "/ueip_map"
 	PinNatMap       = PinDir + "/nat_map"
 	PinStatsMap     = PinDir + "/stats_map"
+	PinTxPort       = PinDir + "/tx_port"
 	PinProg         = PinDir + "/xdp_prog"
 	PinProgDownlink = PinDir + "/xdp_prog_dl"
 )
@@ -214,4 +215,45 @@ func (n *NatMap) List() (map[uint32]*FwdRule, error) {
 		return nil, fmt.Errorf("nat_map iterate: %w", err)
 	}
 	return out, nil
+}
+
+// TxPortMap wraps the BPF_MAP_TYPE_DEVMAP that bpf_redirect_map() targets.
+// It is keyed by egress ifindex and stores the same ifindex as the value.
+// Every out_ifindex a forwarding rule uses must have an entry here, or the
+// in-kernel redirect aborts (drops) that frame.
+type TxPortMap struct{ m *ebpf.Map }
+
+func OpenTxPortMap() (*TxPortMap, error) {
+	m, err := ebpf.LoadPinnedMap(PinTxPort, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open tx_port: %w", err)
+	}
+	return &TxPortMap{m: m}, nil
+}
+
+func NewTxPortMap(m *ebpf.Map) *TxPortMap { return &TxPortMap{m: m} }
+func (t *TxPortMap) Close()               { t.m.Close() }
+
+// Ensure makes tx_port[ifindex] = ifindex so bpf_redirect_map() can send
+// frames out that interface. Idempotent; safe to call on every rule write.
+func (t *TxPortMap) Ensure(ifindex uint32) error {
+	if err := t.m.Put(ifindex, ifindex); err != nil {
+		return fmt.Errorf("tx_port put ifindex %d: %w", ifindex, err)
+	}
+	return nil
+}
+
+// EnsureTxPort opens the pinned devmap and provisions one ifindex, then
+// closes it. Convenience for the rule-adding CLI commands, which otherwise
+// do not hold the map open. A zero ifindex (no egress set) is a no-op.
+func EnsureTxPort(ifindex uint32) error {
+	if ifindex == 0 {
+		return nil
+	}
+	t, err := OpenTxPortMap()
+	if err != nil {
+		return err
+	}
+	defer t.Close()
+	return t.Ensure(ifindex)
 }

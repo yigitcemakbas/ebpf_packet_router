@@ -19,6 +19,10 @@
 #define MAX_TEID_ENTRIES 	65536
 #define MAX_UEIP_ENTRIES	65536
 #define MAX_NAT_ENTRIES		256
+/* tx_port devmap is keyed by ifindex, so it must be sized to cover the
+ * largest ifindex we ever redirect to. Interface indexes on this host are
+ * single/low double digits; 256 is comfortably above that. */
+#define MAX_IFINDEX		256
 
 /* forwarding descriptor */
 struct fwd_rule{

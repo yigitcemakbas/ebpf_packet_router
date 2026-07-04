@@ -120,6 +120,12 @@ which rewrites the source of uplink packets from the UE IP to the NAT IP.`,
 			return err
 		}
 
+		// Make this egress ifindex a valid bpf_redirect_map() target. Without
+		// an entry the in-kernel devmap redirect aborts (drops) the frame.
+		if err := maps.EnsureTxPort(rule.OutIfindex); err != nil {
+			return err
+		}
+
 		fmt.Printf("OK  nat_map[%s] -> ue=%s teid=0x%08X ifindex=%d\n",
 			natIP, ueIP, addNatTeidOut, rule.OutIfindex)
 		return nil

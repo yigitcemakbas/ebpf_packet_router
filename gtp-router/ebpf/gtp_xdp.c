@@ -54,6 +54,29 @@ struct {
 	__type(value, struct fwd_rule);
 } nat_map SEC(".maps");
 
+/* Egress port table for bpf_redirect_map(). Keyed by ifindex, value is the
+ * same ifindex. A DEVMAP batches redirected frames and flushes them once at
+ * the end of the NAPI poll, instead of the immediate single-frame flush that
+ * bpf_redirect() does. This is the standard production pattern (Cilium/Katran)
+ * for interface-to-interface XDP forwarding and is gentler on the driver's TX
+ * ring. The control plane populates one entry per egress ifindex it uses. */
+struct {
+	__uint(type, BPF_MAP_TYPE_DEVMAP);
+	__uint(max_entries, MAX_IFINDEX);
+	__type(key, __u32);
+	__type(value, __u32);
+} tx_port SEC(".maps");
+
+/* redirect_out: send the (already mutated) frame out ifindex via the devmap.
+ * On a devmap miss (ifindex not provisioned) bpf_redirect_map returns 0 =
+ * XDP_ABORTED, which drops the frame; the control plane guarantees an entry
+ * exists for every out_ifindex a rule uses, so a miss means a misconfig, not
+ * a normal path. */
+static __always_inline int redirect_out(__u32 ifindex)
+{
+	return bpf_redirect_map(&tx_port, ifindex, 0);
+}
+
 struct global_stats {
 	__u64 packets;
 	__u64 bytes;
@@ -495,7 +518,7 @@ static __always_inline int try_encap(struct xdp_md *ctx, __be32 pkt_dst, __u64 p
 			}
 			bump_rule(nr, pkt_len);
 			bump_stats(STAT_REDIRECT, pkt_len);
-			return bpf_redirect(nr->out_ifindex, 0);
+			return redirect_out(nr->out_ifindex);
 		}
 	}
 
@@ -517,7 +540,7 @@ static __always_inline int try_encap(struct xdp_md *ctx, __be32 pkt_dst, __u64 p
 		}
 		bump_rule(rule, pkt_len);
 		bump_stats(STAT_REDIRECT, pkt_len);
-		return bpf_redirect(rule->out_ifindex, 0);
+		return redirect_out(rule->out_ifindex);
 	}
 }
 
@@ -644,13 +667,13 @@ int xdp_gtp_router(struct xdp_md *ctx)
 
 		bump_rule(rule, pkt_len);
 		bump_stats(STAT_REDIRECT, pkt_len);
-		return bpf_redirect(rule->out_ifindex, 0);
+		return redirect_out(rule->out_ifindex);
 	}
 	case FWD_ACTION_REDIRECT:
 		rewrite_eth(eth, rule);
 		bump_rule(rule, pkt_len);
 		bump_stats(STAT_REDIRECT, pkt_len);
-		return bpf_redirect(rule->out_ifindex, 0);
+		return redirect_out(rule->out_ifindex);
 	case FWD_ACTION_ENCAP_FWD:
 		goto pass;
 	default:

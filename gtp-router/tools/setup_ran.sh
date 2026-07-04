@@ -35,6 +35,9 @@ RAN_N3="10.201.0.2"
 OGSTUN_ADDR="10.45.0.1/16"
 UE_SUBNET="10.45.0.0/16"
 
+# EGRESS_IFACE / NAT_IP come from ran.conf (auto-detected there when unset).
+[[ -f "$REPO/tools/ran.conf" ]] && source "$REPO/tools/ran.conf"
+
 AMF_YAML="$OPEN5GS/install/etc/open5gs/amf.yaml"
 UPF_YAML="$OPEN5GS/install/etc/open5gs/upf.yaml"
 GNB_YAML="$UERANSIM/config/open5gs-gnb.yaml"
@@ -51,6 +54,9 @@ teardown() {
   pkill -9 -f nr-ue  2>/dev/null || true
   ip netns del "$NETNS" 2>/dev/null || true
   ip link del "$VETH_H" 2>/dev/null || true
+  if [[ -n "${NAT_IP:-}" && -n "${EGRESS_IFACE:-}" ]]; then
+    ip addr del "$NAT_IP/32" dev "$EGRESS_IFACE" 2>/dev/null || true
+  fi
   echo "[setup_ran] done (core left running - use tools/stop_5gc.sh to stop it)."
 }
 
@@ -104,6 +110,17 @@ iptables -t nat -C POSTROUTING -s "$UE_SUBNET" ! -o ogstun -j MASQUERADE 2>/dev/
   || iptables -t nat -A POSTROUTING -s "$UE_SUBNET" ! -o ogstun -j MASQUERADE
 iptables -C FORWARD -j ACCEPT 2>/dev/null || iptables -I FORWARD -j ACCEPT
 
+echo "[setup_ran] 4.5/5 NAT secondary IP on egress ($EGRESS_IFACE)..."
+# The XDP router does static 1:1 NAT for the UE entirely in the XDP hook; the
+# NAT address just needs to exist on the egress NIC so the host answers ARP
+# for it. /32 secondary: no extra subnet route, exact match for teardown.
+if [[ -n "${NAT_IP:-}" && -n "${EGRESS_IFACE:-}" ]]; then
+  ip addr replace "$NAT_IP/32" dev "$EGRESS_IFACE"
+  echo "  [ok]   NAT IP $NAT_IP added on $EGRESS_IFACE"
+else
+  echo "  [WARN] EGRESS_IFACE/NAT_IP not resolved - XDP NAT will not work (check tools/ran.conf)"
+fi
+
 echo "[setup_ran] 5/5 verifying core binds on the veth..."
 if ss -lnp 2>/dev/null | grep -q "${HOST_N3}:2152";  then echo "  [ok]   UPF N3   -> ${HOST_N3}:2152"; else echo "  [WARN] UPF not bound on ${HOST_N3}:2152 - see /tmp/open5gs/upf.log"; fi
 if ss -lnp 2>/dev/null | grep -q "${HOST_N3}:38412"; then echo "  [ok]   AMF NGAP -> ${HOST_N3}:38412"; else echo "  [WARN] AMF not bound on ${HOST_N3}:38412 - see /tmp/open5gs/amf.log"; fi
@@ -122,8 +139,9 @@ cat <<EOF
  Then verify internet through the tunnel:
    sudo ip netns exec $NETNS ping -I uesimtun0 -c 5 8.8.8.8
 
- Attach the router to the real N3 wire:
-   cd $REPO && sudo ./build/gtp-ctrl load --iface $VETH_H --mode generic
+ Attach the router to the real N3 wire (native XDP on both sides):
+   cd $REPO && sudo ./build/gtp-ctrl load --iface $VETH_H --mode native \\
+     --dl-iface $EGRESS_IFACE --dl-mode native
 
  Tear down later:
    sudo bash tools/setup_ran.sh --down

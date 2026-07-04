@@ -164,6 +164,12 @@ with this TEID, it applies the forwarding rule you specify here.`,
 			return err
 		}
 
+		// Make this egress ifindex a valid bpf_redirect_map() target. Without
+		// an entry the in-kernel devmap redirect aborts (drops) the frame.
+		if err := maps.EnsureTxPort(rule.OutIfindex); err != nil {
+			return err
+		}
+
 		fmt.Printf("OK  teid_map[0x%08X] = %s -> %s (ifindex=%d)\n",
 			teid, maps.ActionString(action), addTeidOutIface, rule.OutIfindex)
 		return nil

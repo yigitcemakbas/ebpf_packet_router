@@ -70,6 +70,16 @@ if ! systemctl is-active --quiet mongodb 2>/dev/null && \
   exit 1
 fi
 
+# systemd reports mongodb "active" before it actually listens on 27017; on a
+# cold boot PCF/UDR then die on connect and the UE gets PAYLOAD_NOT_FORWARDED.
+# Wait for the real socket.
+printf "  waiting for MongoDB on 127.0.0.1:27017 ... "
+for _i in $(seq 1 60); do
+  if ss -lnt 2>/dev/null | grep -q ':27017 '; then echo "ok"; break; fi
+  sleep 0.5
+  [[ $_i -eq 60 ]] && echo "WARN (not listening after 30s - PCF/UDR will fail)"
+done
+
 mkdir -p "$LOGDIR"
 
 # wait_port <ip> <port> <label>

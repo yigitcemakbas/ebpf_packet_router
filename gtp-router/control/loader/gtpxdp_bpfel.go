@@ -92,6 +92,7 @@ type GtpXdpMapSpecs struct {
 	NatMap   *ebpf.MapSpec `ebpf:"nat_map"`
 	StatsMap *ebpf.MapSpec `ebpf:"stats_map"`
 	TeidMap  *ebpf.MapSpec `ebpf:"teid_map"`
+	TxPort   *ebpf.MapSpec `ebpf:"tx_port"`
 	UeipMap  *ebpf.MapSpec `ebpf:"ueip_map"`
 }
 
@@ -117,6 +118,7 @@ type GtpXdpMaps struct {
 	NatMap   *ebpf.Map `ebpf:"nat_map"`
 	StatsMap *ebpf.Map `ebpf:"stats_map"`
 	TeidMap  *ebpf.Map `ebpf:"teid_map"`
+	TxPort   *ebpf.Map `ebpf:"tx_port"`
 	UeipMap  *ebpf.Map `ebpf:"ueip_map"`
 }
 
@@ -125,6 +127,7 @@ func (m *GtpXdpMaps) Close() error {
 		m.NatMap,
 		m.StatsMap,
 		m.TeidMap,
+		m.TxPort,
 		m.UeipMap,
 	)
 }
