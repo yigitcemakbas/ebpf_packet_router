@@ -48,8 +48,12 @@ type FwdRule struct {
 	DstIP      uint32
 	SrcIP      uint32
 	DstPort    uint16
-	Pad        [6]byte
-	PktCount   uint64
+	Pad        [2]byte
+	// NatIP: static 1:1 NAT IP in host byte order (IPToUint32 convention).
+	// Uplink: src-rewrite target (UE IP → NatIP). Downlink (nat_map value):
+	// UE IP to restore as inner dst. 0 = no NAT.
+	NatIP    uint32
+	PktCount uint64
 	ByteCount  uint64
 
 	// Per-rule rate limiting (see ebpf/gtp_xdp.c's enforce_policy()).

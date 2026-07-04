@@ -107,6 +107,50 @@ var listCmd = &cobra.Command{
 			fmt.Fprintln(w, "(empty)")
 		}
 
+		fmt.Fprintln(w)
+
+		// nat_map
+		nm, err := maps.OpenNatMap()
+		if err != nil {
+			return err
+		}
+		defer nm.Close()
+
+		natEntries, err := nm.List()
+		if err != nil {
+			return err
+		}
+
+		fmt.Fprintf(w, "=== nat_map (%d entries) ===\n", len(natEntries))
+		if len(natEntries) > 0 {
+			fmt.Fprintln(w, "NAT-IP\tUE-IP\tIFINDEX\tDST-MAC\tSRC-MAC\tTEID-OUT\tPACKETS\tBYTES")
+			fmt.Fprintln(w, "------\t-----\t-------\t-------\t-------\t--------\t-------\t-----")
+
+			ips := make([]uint32, 0, len(natEntries))
+			for k := range natEntries {
+				ips = append(ips, k)
+			}
+			sort.Slice(ips, func(i, j int) bool { return ips[i] < ips[j] })
+
+			for _, ipKey := range ips {
+				r := natEntries[ipKey]
+				natIPBytes := maps.Uint32ToIP(ipKey)
+				ueIPBytes := maps.Uint32ToIP(r.NatIP)
+				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t0x%08X\t%d\t%s\n",
+					net.IP(natIPBytes).String(),
+					net.IP(ueIPBytes).String(),
+					r.OutIfindex,
+					maps.MACString(r.DMac),
+					maps.MACString(r.SMac),
+					r.TeidOut,
+					r.PktCount,
+					maps.FormatBytes(r.ByteCount),
+				)
+			}
+		} else {
+			fmt.Fprintln(w, "(empty)")
+		}
+
 		return w.Flush()
 	},
 }

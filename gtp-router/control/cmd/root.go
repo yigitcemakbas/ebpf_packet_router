@@ -52,6 +52,8 @@ func init() {
 		delTeidCmd,
 		addUeipCmd,
 		delUeipCmd,
+		addNatCmd,
+		delNatCmd,
 		listCmd,
 		statsCmd,
 		dashboardCmd,

@@ -20,6 +20,7 @@ var (
 	addTeidSrcIP               string
 	addTeidTeidOut             uint32
 	addTeidDstPort             uint16
+	addTeidNatIP               string
 	addTeidRatePPS             uint32
 	addTeidQuarantineThreshold uint32
 	addTeidQuarantineSeconds   uint32
@@ -135,6 +136,18 @@ with this TEID, it applies the forwarding rule you specify here.`,
 			rule.DstPort = binary.LittleEndian.Uint16(b)
 		}
 
+		// NAT IP: uplink src-rewrite target (rewrite inner src UE IP → this)
+		if addTeidNatIP != "" {
+			ip := net.ParseIP(addTeidNatIP)
+			if ip == nil {
+				return fmt.Errorf("invalid --nat-ip: %s", addTeidNatIP)
+			}
+			rule.NatIP, err = maps.IPToUint32(ip)
+			if err != nil {
+				return err
+			}
+		}
+
 		// Validate required fields for the chosen action.
 		if err := maps.ValidateRule(rule); err != nil {
 			return err
@@ -148,6 +161,12 @@ with this TEID, it applies the forwarding rule you specify here.`,
 		defer tm.Close()
 
 		if err := tm.Put(teid, rule); err != nil {
+			return err
+		}
+
+		// Make this egress ifindex a valid bpf_redirect_map() target. Without
+		// an entry the in-kernel devmap redirect aborts (drops) the frame.
+		if err := maps.EnsureTxPort(rule.OutIfindex); err != nil {
 			return err
 		}
 
@@ -167,6 +186,7 @@ func init() {
 	addTeidCmd.Flags().StringVar(&addTeidSrcIP, "src-ip", "", "Outer source IP (encap path)")
 	addTeidCmd.Flags().Uint32Var(&addTeidTeidOut, "teid-out", 0, "Outgoing TEID (encap path)")
 	addTeidCmd.Flags().Uint16Var(&addTeidDstPort, "dst-port", 2152, "Outer UDP destination port (encap path)")
+	addTeidCmd.Flags().StringVar(&addTeidNatIP, "nat-ip", "", "Static NAT IP: rewrite inner src UE IP to this on decap (0 = no NAT)")
 	addTeidCmd.Flags().Uint32Var(&addTeidRatePPS, "rate-pps", 0, "Cap this rule to N packets/sec, dropping the rest (0 = unlimited)")
 	addTeidCmd.Flags().Uint32Var(&addTeidQuarantineThreshold, "quarantine-threshold", 0, "Consecutive rate-limit violations before auto-quarantine (0 = disabled)")
 	addTeidCmd.Flags().Uint32Var(&addTeidQuarantineSeconds, "quarantine-seconds", 0, "How long an auto-quarantine lasts (required if --quarantine-threshold is set)")

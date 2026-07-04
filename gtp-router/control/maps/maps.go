@@ -10,11 +10,14 @@ import (
 )
 
 const (
-	PinDir      = "/sys/fs/bpf/gtp_router"
-	PinTeidMap  = PinDir + "/teid_map"
-	PinUeipMap  = PinDir + "/ueip_map"
-	PinStatsMap = PinDir + "/stats_map"
-	PinProg     = PinDir + "/xdp_prog"
+	PinDir          = "/sys/fs/bpf/gtp_router"
+	PinTeidMap      = PinDir + "/teid_map"
+	PinUeipMap      = PinDir + "/ueip_map"
+	PinNatMap       = PinDir + "/nat_map"
+	PinStatsMap     = PinDir + "/stats_map"
+	PinTxPort       = PinDir + "/tx_port"
+	PinProg         = PinDir + "/xdp_prog"
+	PinProgDownlink = PinDir + "/xdp_prog_dl"
 )
 
 type TeidMap struct{ m *ebpf.Map }
@@ -145,4 +148,112 @@ func (u *UeipMap) List() (map[uint32]*FwdRule, error) {
 		return nil, fmt.Errorf("ueip_map iterate: %w", err)
 	}
 	return out, nil
+}
+
+type NatMap struct{ m *ebpf.Map }
+
+func OpenNatMap() (*NatMap, error) {
+	m, err := ebpf.LoadPinnedMap(PinNatMap, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open nat_map: %w", err)
+	}
+	return &NatMap{m: m}, nil
+}
+
+func NewNatMap(m *ebpf.Map) *NatMap { return &NatMap{m: m} }
+func (n *NatMap) Close()            { n.m.Close() }
+
+func (n *NatMap) Put(natIP net.IP, rule *FwdRule) error {
+	key, err := ipKey(natIP)
+	if err != nil {
+		return err
+	}
+	if err := n.m.Put(key, rule); err != nil {
+		return fmt.Errorf("nat_map put %s: %w", natIP, err)
+	}
+	return nil
+}
+
+func (n *NatMap) Delete(natIP net.IP) error {
+	key, err := ipKey(natIP)
+	if err != nil {
+		return err
+	}
+	err = n.m.Delete(key)
+	if err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+		return fmt.Errorf("nat_map delete %s: %w", natIP, err)
+	}
+	return nil
+}
+
+func (n *NatMap) Get(natIP net.IP) (*FwdRule, error) {
+	key, err := ipKey(natIP)
+	if err != nil {
+		return nil, err
+	}
+	var rule FwdRule
+	err = n.m.Lookup(key, &rule)
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("nat_map lookup %s: %w", natIP, err)
+	}
+	return &rule, nil
+}
+
+func (n *NatMap) List() (map[uint32]*FwdRule, error) {
+	out := make(map[uint32]*FwdRule)
+	var key uint32
+	var rule FwdRule
+	iter := n.m.Iterate()
+	for iter.Next(&key, &rule) {
+		r := rule
+		out[key] = &r
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("nat_map iterate: %w", err)
+	}
+	return out, nil
+}
+
+// TxPortMap wraps the BPF_MAP_TYPE_DEVMAP that bpf_redirect_map() targets.
+// It is keyed by egress ifindex and stores the same ifindex as the value.
+// Every out_ifindex a forwarding rule uses must have an entry here, or the
+// in-kernel redirect aborts (drops) that frame.
+type TxPortMap struct{ m *ebpf.Map }
+
+func OpenTxPortMap() (*TxPortMap, error) {
+	m, err := ebpf.LoadPinnedMap(PinTxPort, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open tx_port: %w", err)
+	}
+	return &TxPortMap{m: m}, nil
+}
+
+func NewTxPortMap(m *ebpf.Map) *TxPortMap { return &TxPortMap{m: m} }
+func (t *TxPortMap) Close()               { t.m.Close() }
+
+// Ensure makes tx_port[ifindex] = ifindex so bpf_redirect_map() can send
+// frames out that interface. Idempotent; safe to call on every rule write.
+func (t *TxPortMap) Ensure(ifindex uint32) error {
+	if err := t.m.Put(ifindex, ifindex); err != nil {
+		return fmt.Errorf("tx_port put ifindex %d: %w", ifindex, err)
+	}
+	return nil
+}
+
+// EnsureTxPort opens the pinned devmap and provisions one ifindex, then
+// closes it. Convenience for the rule-adding CLI commands, which otherwise
+// do not hold the map open. A zero ifindex (no egress set) is a no-op.
+func EnsureTxPort(ifindex uint32) error {
+	if ifindex == 0 {
+		return nil
+	}
+	t, err := OpenTxPortMap()
+	if err != nil {
+		return err
+	}
+	defer t.Close()
+	return t.Ensure(ifindex)
 }

@@ -18,6 +18,11 @@
 /* map sizing */
 #define MAX_TEID_ENTRIES 	65536
 #define MAX_UEIP_ENTRIES	65536
+#define MAX_NAT_ENTRIES		256
+/* tx_port devmap is keyed by ifindex, so it must be sized to cover the
+ * largest ifindex we ever redirect to. Interface indexes on this host are
+ * single/low double digits; 256 is comfortably above that. */
+#define MAX_IFINDEX		256
 
 /* forwarding descriptor */
 struct fwd_rule{
@@ -29,9 +34,12 @@ struct fwd_rule{
 	__be32 dst_ip;
 	__be32 src_ip;
 	__u16 dst_port;
-	__u8 _pad[6]; /* pad so pkt_count/byte_count land on their natural 8-byte
-	              * alignment and the struct is exactly 56 bytes, matching the
-	              * Go mirror in control/maps/types.go (FwdRule). */
+	__u8 _pad[2];
+	/* Static 1:1 NAT IP in host byte order (same convention as src_ip/dst_ip).
+	 * Uplink (decap): rewrite inner src to this value before forwarding.
+	 * Downlink (encap, nat_map value): the UE IP to restore as inner dst.
+	 * 0 = no NAT. */
+	__u32 nat_ip;
 	__u64 pkt_count;
 	__u64 byte_count;
 

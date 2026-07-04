@@ -19,3 +19,5 @@ control/vendor/
 .idea/
 *.swp
 *.swo
+
+tools/SETUP_5GC.md
