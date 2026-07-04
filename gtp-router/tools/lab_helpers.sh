@@ -91,11 +91,13 @@ _smac() { cat /sys/class/net/"$EGRESS_IFACE"/address 2>/dev/null; }
 _vmac_host() { cat /sys/class/net/"$LAB_VETH"/address 2>/dev/null; }
 _vmac_ns()   { sudo ip netns exec "$LAB_NETNS" cat /sys/class/net/"$LAB_VETH_NS"/address 2>/dev/null; }
 
-# _dmac: the next-hop (gateway) MAC for real egress. Refresh the ARP cache
-# with arping (pure L2, no ICMP - this LAN kicks the VM off WiFi when it sees
-# ICMP from it) only if the kernel doesn't already have a valid entry.
+# _dmac: the next-hop MAC on the uplink egress leg. On the veth "internet"
+# standin (tools/lab.sh) there is no LAN gateway to ARP - the next hop is the
+# peer veth, whose MAC lab.sh pins via LAB_DMAC. When that is set we use it
+# directly; otherwise we fall back to the real-egress gateway resolution.
 _dmac() {
   local gw mac
+  if [ -n "${LAB_DMAC:-}" ]; then echo "$LAB_DMAC"; return; fi
   gw=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
   [ -z "$gw" ] && return
   mac=$(ip neigh show "$gw" 2>/dev/null | awk '$NF=="REACHABLE" || $NF=="STALE" || $NF=="DELAY" || $NF=="PROBE" {print $5; exit}')

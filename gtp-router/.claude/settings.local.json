@@ -220,7 +220,16 @@
       "Bash(ip -o link show)",
       "Bash(awk -F': ' '{print $2}')",
       "Read(//sys/fs/bpf/**)",
-      "Bash(cd *)"
+      "Bash(cd *)",
+      "Bash(sudo ss -lnp)",
+      "Bash(sudo tail -5 /tmp/open5gs/amf.log)",
+      "Bash(sudo tail -5 /tmp/open5gs/upf.log)",
+      "Bash(ip -4 -o addr show veth-ran)",
+      "Bash(sudo tmux capture-pane -t gtplab:provision -p)",
+      "Bash(sudo tmux send-keys -t gtplab:control.1 p)",
+      "Bash(sudo timeout 12 bash -c 'sleep 9')",
+      "Bash(sudo tmux capture-pane -t gtplab:traffic -p)",
+      "Bash(sudo tmux capture-pane -t gtplab:control.1 -p)"
     ]
   }
 }
