@@ -211,7 +211,16 @@
       "Bash(sudo ip netns exec ran ip link set dev veth-ran-ns xdpdrv obj /tmp/xdp_pass.o sec xdp)",
       "Bash(sudo ip netns exec inet ip link show veth-inet1)",
       "Bash(sudo ip netns exec ran  ip link show veth-ran-ns)",
-      "Bash(timeout 140 sudo bash tools/veth_roundtrip.sh)"
+      "Bash(timeout 140 sudo bash tools/veth_roundtrip.sh)",
+      "Bash(sudo bpftool map dump pinned /sys/fs/bpf/gtp_router/stats_map)",
+      "Bash(sudo timeout 3 tcpdump -i eth0 -nn -q)",
+      "Bash(awk '{print $2,$3,$4}')",
+      "Bash(sudo timeout 3 tcpdump -i eth0 -nn 'udp port 2152')",
+      "Bash(ip -d link show)",
+      "Bash(ip -o link show)",
+      "Bash(awk -F': ' '{print $2}')",
+      "Read(//sys/fs/bpf/**)",
+      "Bash(cd *)"
     ]
   }
 }
