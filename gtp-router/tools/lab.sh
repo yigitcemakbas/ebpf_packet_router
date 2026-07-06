@@ -167,8 +167,14 @@ PING_LOG=/tmp/gtp-lab-ping.log
 # veth peer, which the provision step routes through uesimtun0 (the tunnel).
 tmux send-keys -t "$SESSION:control" \
   "cd $REPO && EGRESS_IFACE=$EGRESS_IFACE NAT_IP=$NAT_IP LAB_DMAC=$LAB_DMAC LAB_PEER=$PEER_IP source tools/lab_helpers.sh" C-m
+# The dashboard's "t" key provisions the REAL round-trip rules from the live
+# session, so it gets the full topology env (same vars tools/lab_provision.sh
+# reads) in addition to the ping config.
 tmux split-window -h -p 65 -t "$SESSION:control" \
-  "cd $REPO && sudo PING_TARGET=$PING_TARGET PING_INTERVAL=$PING_INTERVAL PING_SIZE=$PING_SIZE PING_NETNS=$NETNS EGRESS_IFACE=$EGRESS_IFACE NAT_IP=$NAT_IP ./build/gtp-ctrl dashboard"
+  "cd $REPO && sudo PING_TARGET=$PING_TARGET PING_INTERVAL=$PING_INTERVAL PING_SIZE=$PING_SIZE PING_NETNS=$NETNS \
+     NETNS=$NETNS VETH=$VETH VRANNS=$VRANNS INET_NS=$INET_NS VINET0=$VINET0 VINET1=$VINET1 \
+     HOST_N3=$HOST_N3 RAN_N3=$RAN_N3 PEER_IP=$PEER_IP EGRESS_IFACE=$EGRESS_IFACE NAT_IP=$NAT_IP \
+     ./build/gtp-ctrl dashboard"
 
 # window 1 'gnb'
 tmux new-window -t "$SESSION" -n gnb \
@@ -178,10 +184,17 @@ tmux new-window -t "$SESSION" -n gnb \
 tmux new-window -t "$SESSION" -n ue \
   "cd $UERANSIM && until sudo ip netns exec $NETNS ss -uln 2>/dev/null | grep -q ':4997'; do sleep 1; done; sudo ip netns exec $NETNS ./build/nr-ue -c config/open5gs-ue.yaml 2>&1 | tee /tmp/ue.log"
 
-# window 3 'provision' - waits for the UE, then installs the REAL round-trip
-# rules from the LIVE TEID (this is what makes rule counters actually climb).
+# window 3 'provision' - provisioning now lives on the dashboard's "t" key
+# (capture live TEIDs + install the round-trip rules). This window keeps the
+# standalone tools/lab_provision.sh one keystroke away as a fallback / for
+# re-provisioning after the TEID rotates.
 tmux new-window -t "$SESSION" -n provision \
-  "cd $REPO && REPO=$REPO NETNS=$NETNS VETH=$VETH VRANNS=$VRANNS INET_NS=$INET_NS VINET0=$VINET0 VINET1=$VINET1 HOST_N3=$HOST_N3 RAN_N3=$RAN_N3 PEER_IP=$PEER_IP NAT_IP=$NAT_IP sudo -E bash tools/lab_provision.sh"
+  "cd $REPO && echo '[provision] press  t  in the dashboard to install the REAL round-trip rules'; \
+   echo '           from the live session. To re-provision manually, run:'; \
+   echo; \
+   echo '   REPO=$REPO NETNS=$NETNS VETH=$VETH VRANNS=$VRANNS INET_NS=$INET_NS VINET0=$VINET0 VINET1=$VINET1 \\'; \
+   echo '   HOST_N3=$HOST_N3 RAN_N3=$RAN_N3 PEER_IP=$PEER_IP NAT_IP=$NAT_IP sudo -E bash tools/lab_provision.sh'; \
+   exec bash"
 
 # window 4 'traffic' - tails the dashboard-managed ping log (start it with "p")
 tmux new-window -t "$SESSION" -n traffic \
@@ -200,17 +213,17 @@ cat <<EOF
      0 control    - dashboard (right) + your command shell (left)
      1 gnb        - gNB log
      2 ue         - UE log (auto-starts after the gNB)
-     3 provision  - waits for the UE, provisions the REAL rules, then
-                    tells you to press 'p'. Watch this one first.
+     3 provision  - manual re-provision command (the "t" key does this too)
      4 traffic    - the UE's tunnel ping output (start it with "p")
 
  DEMO FLOW:
-   1. Wait for the 'provision' window to say "REAL rules provisioned".
-   2. Switch to 'control' and press  p  in the dashboard.
-   3. Watch teid_map / nat_map per-rule counters climb 0 -> N live -
-      those are real GTP-U matches through the tunnel, native XDP.
+   1. Wait for the 'ue' window to attach (uesimtun0 gets an IP).
+   2. In the dashboard press  t  to provision the REAL round-trip rules
+      from the live session (captures the current uplink/downlink TEIDs).
+   3. Press  p  to start the tunnel ping, and watch teid_map / nat_map
+      per-rule counters climb 0 -> N live - real GTP-U matches, native XDP.
 
- Dashboard keys:  p ping   a add  e edit  d delete   c snapshot   q quit
+ Dashboard keys:  t live-rules  p ping   a add  e edit  d delete   c snapshot   q quit
  Control verbs:   showteid | decap | drop | redirect | ratelimit [pps]
                   quarantine [pps] [thr] [secs] | clearrule
 
