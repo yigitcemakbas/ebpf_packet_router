@@ -2,7 +2,7 @@
 
 ## Overview
 
-Runtime Accelerator for N3 Appliance (RANA) is a kernel-resident data plane for 5G network user
+Runtime Accelerator for N3 Appliance is a kernel-resident data plane for 5G network user
 plane traffic, implemented in eBPF and attached via eXpress Data Path
 (XDP). It processes GTP-U (GPRS Tunneling Protocol - User Plane) traffic
 inside the network driver's receive path, before the kernel allocates a
