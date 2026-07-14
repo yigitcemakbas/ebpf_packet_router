@@ -17,6 +17,7 @@ Install:
 """
 
 import argparse
+import ipaddress
 import time
 import struct
 import sys
@@ -117,10 +118,23 @@ def main():
                     choices=["uplink", "downlink"],
                     help="uplink = send GTP-U (decap test); "
                          "downlink = send bare IP to the UE (encap test)")
+    ap.add_argument("--num-subscribers", default=1, type=int,
+                    help="Uplink only: interleave traffic across N distinct "
+                         "TEIDs/inner-dst-IPs instead of one flow, to "
+                         "exercise many concurrent teid_map rules at once. "
+                         "1 (default) preserves single-flow behavior; "
+                         "--teid/--inner-dst are ignored when > 1.")
+    ap.add_argument("--teid-base", default="0x1000",
+                    help="First TEID when --num-subscribers > 1; "
+                         "subscriber i uses teid_base + i")
+    ap.add_argument("--inner-dst-base", default="10.2.0.1",
+                    help="First inner dest IP when --num-subscribers > 1; "
+                         "subscriber i uses inner_dst_base + i")
     args = ap.parse_args()
 
     teid = int(args.teid, 0)
     iface = args.iface
+    num_subs = max(1, args.num_subscribers)
 
     src_mac = get_if_hwaddr(iface)
     dst_mac = args.dst_mac or "ff:ff:ff:ff:ff:ff"   # broadcast default
@@ -128,6 +142,41 @@ def main():
     interval = 1.0 / args.pps if args.pps > 0 else 0
     payload  = bytes(range(args.payload_len % 256)) * (args.payload_len // 256 + 1)
     payload  = payload[:args.payload_len]
+
+    if num_subs > 1 and args.mode != "uplink":
+        sys.exit("--num-subscribers > 1 is only supported in uplink mode")
+
+    if num_subs > 1:
+        teid_base = int(args.teid_base, 0)
+        dst_base = int(ipaddress.IPv4Address(args.inner_dst_base))
+        teids = [teid_base + i for i in range(num_subs)]
+        inner_dsts = [str(ipaddress.IPv4Address(dst_base + i)) for i in range(num_subs)]
+        print(f"[gtp-gen] Interface : {iface}  {num_subs} concurrent subscribers")
+        print(f"          TEIDs     : 0x{teids[0]:08X} .. 0x{teids[-1]:08X}")
+        print(f"          Inner dst : {inner_dsts[0]} .. {inner_dsts[-1]}")
+        print(f"          Count/sub={args.count}  Aggregate PPS={args.pps}")
+        print()
+
+        total = args.count * num_subs
+        sent = 0
+        for i in range(total):
+            sub = i % num_subs
+            pkt = craft_gtpu_packet(
+                src_mac=src_mac, dst_mac=dst_mac,
+                outer_src_ip=args.src_ip, outer_dst_ip=args.dst_ip,
+                inner_src_ip=args.inner_src, inner_dst_ip=inner_dsts[sub],
+                teid=teids[sub],
+                payload=payload,
+            )
+            sendp(pkt, iface=iface, verbose=False)
+            sent += 1
+            if sent % 100 == 0 or sent == total:
+                print(f"\r[gtp-gen] Sent {sent}/{total}", end="", flush=True)
+            if interval:
+                time.sleep(interval)
+
+        print(f"\n[gtp-gen] Done. {sent} packets sent across {num_subs} subscribers.")
+        return
 
     if args.mode == "downlink":
         print(f"[gtp-gen] Interface : {iface}  mode=downlink (encap test)")

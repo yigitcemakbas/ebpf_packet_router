@@ -88,21 +88,14 @@ ip netns exec "$RAN"  ip link set dev "$VRANNS"  xdpdrv obj "$PASS_OBJ" sec xdp 
   || die "xdp_pass attach on $VRANNS failed"
 
 # --- 4. assert NATIVE (xdp, never xdpgeneric) on every data-path iface ------
-assert_native(){ # <iface> [netns]
-  local iface="$1" ns="${2:-}" out mode
-  if [[ -n "$ns" ]]; then out=$(ip netns exec "$ns" ip link show "$iface"); else out=$(ip link show "$iface"); fi
-  case "$out" in
-    *xdpgeneric*) die "$iface is xdpgeneric (post-sk_buff) - requirement is native/xdp" ;;
-    *xdp*)        mode=xdp ;;
-    *)            die "$iface has NO xdp program attached" ;;
-  esac
-  printf "  %-12s %s\n" "$iface" "$mode"
-}
+# assert_native / assert_native_all come from the shared tools/native_check.sh
+# (same helper lab.sh uses). It returns non-zero rather than exiting, so wrap it
+# in die() to preserve this script's fail-fast behavior.
+# shellcheck source=tools/native_check.sh
+source "$(dirname "$(readlink -f "$0")")/native_check.sh"
 log "verifying native mode on all data-path interfaces:"
-assert_native "$VRAN"
-assert_native "$VINET0"
-assert_native "$VINET1" "$INET"
-assert_native "$VRANNS" "$RAN"
+assert_native_all "$VRAN" "$VINET0" "$VINET1" "$INET" "$VRANNS" "$RAN" \
+  || die "not all data-path interfaces are native/xdp"
 
 # --- 5. gNB + UE (self-managed children) -----------------------------------
 cleanup(){ pkill -f nr-ue 2>/dev/null; pkill -f nr-gnb 2>/dev/null; pkill -f 'ping -O' 2>/dev/null; }

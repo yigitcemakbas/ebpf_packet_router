@@ -57,5 +57,6 @@ func init() {
 		listCmd,
 		statsCmd,
 		dashboardCmd,
+		pfcpServeCmd,
 	)
 }
