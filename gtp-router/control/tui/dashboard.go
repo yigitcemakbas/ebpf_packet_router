@@ -10,7 +10,6 @@ package tui
 import (
 	"encoding/base64"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"sort"
@@ -172,6 +171,10 @@ type model struct {
 	interval time.Duration
 	width    int
 
+	// live rule provisioning (triggered with "t") runs async; this guards
+	// against re-entry while a capture is in flight.
+	provisioning bool
+
 	// dashboard-managed traffic ping (toggled with "p"); config from env.
 	pingOn       bool
 	pingTarget   string
@@ -275,6 +278,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusUntil = time.Now().Add(4 * time.Second)
 		return m, nil
 
+	case provisionResultMsg:
+		m.provisioning = false
+		if msg.err != nil {
+			m.statusMsg = "provision failed: " + msg.err.Error()
+			m.statusUntil = time.Now().Add(8 * time.Second)
+			return m, nil
+		}
+		m.statusMsg = fmt.Sprintf(
+			"live rules installed: uplink 0x%08X decap+NAT (%s -> %s), downlink 0x%08X encap",
+			msg.teid, msg.ueIP, topoFromEnv().natIP, msg.dlteid)
+		m.statusUntil = time.Now().Add(8 * time.Second)
+		return m, m.fetchCmd()
+
 	case copyResultMsg:
 		if msg.err != nil {
 			m.statusMsg = "snapshot failed: " + msg.err.Error()
@@ -350,13 +366,15 @@ func (m model) updateView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, startPingCmd(m.pingNetns, m.pingInterval, m.pingSize, m.pingTarget)
 
 	case "t":
-		if err := m.addDefaultRules(); err != nil {
-			m.err = err
+		if m.provisioning {
+			m.statusMsg = "already provisioning live rules..."
+			m.statusUntil = time.Now().Add(3 * time.Second)
 			return m, nil
 		}
-		m.statusMsg = "added default test rules (2 TEID, 1 UE-IP; two under policy)"
-		m.statusUntil = time.Now().Add(4 * time.Second)
-		return m, m.fetchCmd()
+		m.provisioning = true
+		m.statusMsg = "provisioning live rules: capturing the session's TEIDs (up to ~8s)..."
+		m.statusUntil = time.Now().Add(30 * time.Second)
+		return m, provisionLiveCmd(m.tm, topoFromEnv())
 
 	case "?", "h":
 		m.mode = modeHelp
@@ -466,26 +484,6 @@ func stopPingCmd(target string) tea.Cmd {
 // so it won't touch unrelated pings.
 func stopPingSync(target string) {
 	_ = exec.Command("pkill", "-f", "ping -i .* "+target).Run()
-}
-
-// addDefaultRules inserts a few example rules so the panels can be exercised
-// without live traffic. They use the "drop" action (needs no iface/MAC), and
-// two carry rate-limit/quarantine so the Enforcement panel populates too.
-func (m model) addDefaultRules() error {
-	if err := m.tm.Put(0xDEAD, &maps.FwdRule{Action: maps.ActionDrop}); err != nil {
-		return err
-	}
-	if err := m.tm.Put(0xBEEF, &maps.FwdRule{
-		Action: maps.ActionDrop, RatePPS: 5, QuarantineThreshold: 3, QuarantineSeconds: 30,
-	}); err != nil {
-		return err
-	}
-	if err := m.um.Put(net.ParseIP("10.45.0.99"), &maps.FwdRule{
-		Action: maps.ActionDrop, RatePPS: 10,
-	}); err != nil {
-		return err
-	}
-	return nil
 }
 
 // plainSnapshot renders the current dashboard state as plain ASCII text -
@@ -767,7 +765,9 @@ KEYS
   e / enter      edit the selected rule (incl. its rate-limit/quarantine)
   d / x          delete the selected rule
   p              start / stop the traffic ping (output in the traffic pane)
-  t              add default test rules (populate the panels)
+  t              provision LIVE rules from the running session: capture the
+                 uplink/downlink TEIDs + UE IP and install decap+NAT (uplink)
+                 and encap (downlink) so the panels track real traffic
   c              save a snapshot to /tmp/gtp-dashboard-snapshot.txt
   ? / h          show this manual
   q / ctrl+c     quit
@@ -811,7 +811,7 @@ func (m model) renderView() string {
 	enforcePanel := panelStyle.Render(titleStyle.Render("  enforcement (rate-limit / quarantine)") + "\n" + m.renderEnforcement())
 	statsPanel := panelStyle.Render(titleStyle.Render("global verdict counters") + "\n" + m.renderStats())
 
-	footer := footerStyle.Render("tab: switch   up/down: select   a: add   e: edit   d: delete   p: ping   t: test rules   c: snapshot   ?: help   q: quit")
+	footer := footerStyle.Render("tab: switch   up/down: select   a: add   e: edit   d: delete   p: ping   t: live rules   c: snapshot   ?: help   q: quit")
 	if time.Now().Before(m.statusUntil) {
 		footer = footerStyle.Render(m.statusMsg) + "\n" + footer
 	}

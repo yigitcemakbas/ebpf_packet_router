@@ -114,9 +114,14 @@ echo "[setup_ran] 4.5/5 NAT secondary IP on egress ($EGRESS_IFACE)..."
 # The XDP router does static 1:1 NAT for the UE entirely in the XDP hook; the
 # NAT address just needs to exist on the egress NIC so the host answers ARP
 # for it. /32 secondary: no extra subnet route, exact match for teardown.
-if [[ -n "${NAT_IP:-}" && -n "${EGRESS_IFACE:-}" ]]; then
+if [[ -n "${NAT_IP:-}" && -n "${EGRESS_IFACE:-}" ]] && ip link show "$EGRESS_IFACE" >/dev/null 2>&1; then
   ip addr replace "$NAT_IP/32" dev "$EGRESS_IFACE"
   echo "  [ok]   NAT IP $NAT_IP added on $EGRESS_IFACE"
+elif [[ -n "${EGRESS_IFACE:-}" ]] && ! ip link show "$EGRESS_IFACE" >/dev/null 2>&1; then
+  # In the veth lab, EGRESS_IFACE (veth-inet0) is created by tools/lab.sh AFTER
+  # this script runs, and lab.sh adds NAT_IP on the veth itself - so a missing
+  # egress here is expected, not fatal. (set -e would otherwise abort the lab.)
+  echo "  [skip] egress $EGRESS_IFACE not present yet - NAT secondary added later by the caller"
 else
   echo "  [WARN] EGRESS_IFACE/NAT_IP not resolved - XDP NAT will not work (check tools/ran.conf)"
 fi
