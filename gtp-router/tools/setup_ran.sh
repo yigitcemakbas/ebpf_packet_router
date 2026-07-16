@@ -99,7 +99,9 @@ ip netns exec "$NETNS" ip route add default via "$HOST_N3"
 echo "[setup_ran] 3/5 starting MongoDB + Open5GS core (NGAP/N3 bind on $HOST_N3)..."
 systemctl start mongodb 2>/dev/null || systemctl start mongod 2>/dev/null || true
 bash "$REPO/tools/stop_5gc.sh" >/dev/null 2>&1 || true
-bash "$REPO/tools/start_5gc.sh" --open5gs "$OPEN5GS"
+# The AMF NGAP and UPF N3 are rebound onto the veth (HOST_N3) by the sed edits
+# above, so tell start_5gc.sh to probe those addresses, not the stock loopbacks.
+N3_IP="$HOST_N3" NGAP_IP="$HOST_N3" bash "$REPO/tools/start_5gc.sh" --open5gs "$OPEN5GS"
 
 echo "[setup_ran] 4/5 re-asserting host data-plane (ogstun / NAT / forwarding)..."
 for i in $(seq 1 10); do ip link show ogstun >/dev/null 2>&1 && break; sleep 0.5; done

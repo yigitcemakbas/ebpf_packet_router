@@ -213,12 +213,25 @@ func (s *Server) handleSessionEstablishment(msg *message, src *net.UDPAddr) {
 			}
 		}
 		if srcIf == ifaceAccess {
-			// Uplink detection rule. Its F-TEID is normally CHOOSE (UPF
-			// allocates); allocate regardless and echo it back in Created PDR.
+			// Uplink detection rule. Its F-TEID is either CHOOSE (the SMF asks
+			// us to allocate) or a concrete TEID the SMF has already assigned
+			// and handed to the gNB. Open5GS logs "F-TEID allocation/release
+			// not supported with peer" and takes the latter path, so if we
+			// blindly allocate our own we key teid_map on a TEID the gNB never
+			// uses and every uplink G-PDU misses. Honor the provided TEID; only
+			// allocate when CHOOSE is set.
 			if id := findIE(pdr.Children, iePDRID); id != nil && len(id.Value) >= 2 {
 				chosenPDRID = beUint16(id.Value)
 			}
-			sess.uplinkTEID = s.allocTEID()
+			if ft := findIE(pdi.Children, ieFTEID); ft != nil {
+				if d, err := parseFTEID(ft.Value); err == nil && !d.Choose {
+					sess.uplinkTEID = d.TEID
+				} else {
+					sess.uplinkTEID = s.allocTEID()
+				}
+			} else {
+				sess.uplinkTEID = s.allocTEID()
+			}
 			haveUplink = true
 		}
 	}

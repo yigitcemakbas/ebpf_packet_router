@@ -39,6 +39,13 @@ HOST_N3="${HOST_N3:-10.201.0.1}"; RAN_N3="${RAN_N3:-10.201.0.2}"
 PEER="${PEER_IP:-10.99.0.2}";  NAT_IP="${NAT_IP:-10.99.0.10}"
 NAT_IP_BASE="${NAT_IP_BASE:-$NAT_IP}"
 NUM_UES="${NUM_UES:-1}"
+# Per-UE mapping persisted here the moment each UE's TEIDs are still visible on
+# the wire (before any decap rule exists to hide the traffic from the tap).
+# lab_helpers.sh reads this file by UE index so its verbs resolve the RIGHT UE
+# in steady state instead of re-sniffing - which native XDP redirect makes
+# impossible once a rule is installed. Columns (tab-separated):
+#   index  uesimtunN  UEIP  uplinkTEID  downlinkTEID  NATIP
+LAB_UESTATE="${LAB_UESTATE:-/tmp/gtp-lab-ues.tsv}"
 
 nat_ip_for() { echo "${NAT_IP_BASE%.*}.$(( ${NAT_IP_BASE##*.} + $1 ))"; }
 
@@ -112,6 +119,8 @@ capture_teids() {
 # --- 4. per-UE: capture live TEIDs + provision the rule pair --------------
 declare -a SUMMARY
 provisioned=0
+# Start the state file fresh; each UE appends its row after it provisions OK.
+: > "$LAB_UESTATE" 2>/dev/null || log "  (warning: cannot write $LAB_UESTATE - helper verbs will fall back to sniffing)"
 for (( u=0; u<NUM_UES; u++ )); do
   ueip=$(ue_ip_of "$u")
   if [[ -z "$ueip" ]]; then
@@ -139,6 +148,10 @@ for (( u=0; u<NUM_UES; u++ )); do
 
   SUMMARY+=("   UE $u  uesimtun$u=$ueip  teid_map[$T] DECAP+NAT->$nat_u  nat_map[$nat_u] NAT->$ueip encap(teid=$DT) out $VRAN")
   provisioned=$((provisioned+1))
+  # Persist this UE's freshly-captured mapping so lab_helpers.sh can resolve it
+  # by index later, when the tap can no longer see the (now-redirected) traffic.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$u" "uesimtun$u" "$ueip" "$T" "$DT" "$nat_u" \
+    >> "$LAB_UESTATE" 2>/dev/null || true
 done
 
 [[ "$provisioned" -gt 0 ]] || die "no UEs provisioned"

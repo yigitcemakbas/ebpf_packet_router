@@ -31,6 +31,7 @@ DURATION="${DURATION:-10}"
 PKT_SIZE="${PKT_SIZE:-64}"
 TEID="${TEID:-0xDEAD}"
 GTP_CTRL="${GTP_CTRL:-./build/gtp-ctrl}"
+PASS_OBJ="${PASS_OBJ:-build/xdp_pass.o}"
 PCAP_GTP="/tmp/bench_gtp_$$.pcap"
 PCAP_PLAIN="/tmp/bench_plain_$$.pcap"
 RESULTS="/tmp/gtp-bench-results.txt"
@@ -57,6 +58,20 @@ trap cleanup EXIT
 # rx_packets counter on veth-core1 inside the core namespace - the uniform
 # measurement point for every mode.
 core_rx() { ip netns exec core cat /sys/class/net/veth-core1/statistics/rx_packets 2>/dev/null || echo 0; }
+
+# The router redirects decapped frames to veth-core0 with bpf_redirect; in native
+# XDP that reaches the peer veth-core1 via veth's ndo_xdp_xmit, which ONLY
+# delivers to a peer that has an XDP program attached. Without a stub on
+# veth-core1 the frames are silently dropped and the native/generic rows measure
+# ~0 even while the router's own REDIRECT counter shows full rate (bug G1).
+# setup_netns.sh recreates the core namespace on every call, so re-attach after
+# each one.
+attach_core_stub() {
+  [[ -f "$PASS_OBJ" ]] || { echo "error: $PASS_OBJ not built - run 'make all'" >&2; exit 1; }
+  ip netns exec core ip link set dev veth-core1 xdpdrv obj "$PASS_OBJ" sec xdp 2>/dev/null || true
+}
+# core_has_xdp - true if veth-core1 currently has any XDP program attached.
+core_has_xdp() { ip netns exec core ip link show veth-core1 2>/dev/null | grep -q 'xdp'; }
 
 # run_replay <pcap> <duration> - blast <pcap> at max rate from the gnb namespace
 # for <duration> seconds. tcpreplay --loop 0 loops forever; timeout bounds it.
@@ -91,6 +106,7 @@ echo
 #     first in native mode, then read the MACs). ---
 echo "[bench] bringing up topology to read interface MACs..."
 XDP_MODE=native TEID="$TEID" bash tools/setup_netns.sh --mode native >/dev/null 2>&1
+attach_core_stub
 GNB1_MAC=$(cat /sys/class/net/veth-gnb1/address)
 GNB0_MAC=$(ip netns exec gnb cat /sys/class/net/veth-gnb0/address)
 
@@ -122,7 +138,15 @@ PYEOF
 echo
 echo "[native] GTP-U decap + redirect, native/driver XDP (pre-sk_buff)"
 if ip link show veth-gnb1 | grep -q "xdpgeneric"; then
-  echo "  [WARN] veth-gnb1 attached as xdpgeneric, not native - native row may be invalid"
+  echo "  error: veth-gnb1 attached as xdpgeneric, not native - native row would be invalid" >&2
+  exit 1
+fi
+# The native row is only meaningful if the redirect target can actually receive
+# the frames; without the stub they vanish and the number lies (bug G1/G3).
+if ! core_has_xdp; then
+  echo "  error: veth-core1 has no XDP program - native redirect frames would be dropped" >&2
+  echo "         (attach_core_stub failed; is $PASS_OBJ built and does veth support xdpdrv?)" >&2
+  exit 1
 fi
 PPS_NATIVE=$(measure "$PCAP_GTP" "native" | tail -1)
 
@@ -130,6 +154,9 @@ PPS_NATIVE=$(measure "$PCAP_GTP" "native" | tail -1)
 echo
 echo "[generic] GTP-U decap + redirect, generic/SKB XDP (post-sk_buff)"
 XDP_MODE=generic TEID="$TEID" bash tools/setup_netns.sh --mode generic >/dev/null 2>&1
+# Generic XDP redirect delivers to veth-core1 through the normal receive path, but
+# keep the stub attached so the measurement point is identical across modes.
+attach_core_stub
 PPS_GENERIC=$(measure "$PCAP_GTP" "generic" | tail -1)
 
 # --- plain (no XDP, kernel IP forwarding) ---------------------------------
@@ -139,10 +166,36 @@ echo "[plain] kernel IP forwarding, no XDP (post-sk_buff baseline)"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 # permit forwarding and relax rp_filter for the asymmetric synthetic path
 iptables -C FORWARD -j ACCEPT 2>/dev/null || iptables -I FORWARD -j ACCEPT
-for i in all veth-gnb1 veth-core0; do sysctl -w "net.ipv4.conf.$i.rp_filter=0" >/dev/null 2>&1 || true; done
+for i in all default veth-gnb1 veth-core0; do sysctl -w "net.ipv4.conf.$i.rp_filter=0" >/dev/null 2>&1 || true; done
+# The forwarded packet (src 10.0.0.1) is delivered locally on veth-core1 inside
+# the core namespace, which has no route back to 10.0.0.1 - strict rp_filter there
+# would drop it on input. Relax rp_filter in the core ns and add the return route
+# so delivery (and the rx_packets count) actually happens (bug G2).
+for i in all default veth-core1; do
+  ip netns exec core sysctl -w "net.ipv4.conf.$i.rp_filter=0" >/dev/null 2>&1 || true
+done
+ip netns exec core ip route replace 10.0.0.0/24 via 10.0.1.1 2>/dev/null || true
 # gnb needs a route to the core subnet via the host (dst MAC is hardcoded in the
 # frame, but the host still routes on dst IP once it ingresses).
 ip netns exec gnb ip route replace 10.0.1.0/24 via 10.0.0.2 2>/dev/null || true
+# Re-craft the plain frame with the CURRENT veth MACs. Unlike XDP (which sees the
+# frame before the L2 destination check and so ignores dst MAC), plain kernel
+# forwarding drops any frame whose dst MAC isn't veth-gnb1's - and setup_netns.sh
+# recreated the veths (with fresh MACs) for the generic run after the pcaps were
+# first crafted, leaving the original dst MAC stale. Without this the plain row
+# reads ~0 (bug G2).
+GNB1_MAC=$(cat /sys/class/net/veth-gnb1/address)
+GNB0_MAC=$(ip netns exec gnb cat /sys/class/net/veth-gnb0/address)
+python3 - "$PCAP_PLAIN" "$GNB0_MAC" "$GNB1_MAC" "$PKT_SIZE" <<'PYEOF'
+import sys
+from scapy.all import Ether, IP, UDP, Raw, wrpcap
+pcap_plain, smac, dmac, size_s = sys.argv[1:5]
+size = int(size_s)
+payload = bytes((i % 256 for i in range(size)))
+plain = (Ether(src=smac, dst=dmac) / IP(src="10.0.0.1", dst="10.0.1.2", ttl=64)
+         / UDP(sport=4096, dport=9999) / Raw(payload))
+wrpcap(pcap_plain, plain)
+PYEOF
 PPS_PLAIN=$(measure "$PCAP_PLAIN" "plain" | tail -1)
 
 # --- report ---------------------------------------------------------------
@@ -159,5 +212,42 @@ PPS_PLAIN=$(measure "$PCAP_PLAIN" "plain" | tail -1)
 
 echo
 echo "results written to $RESULTS"
-echo "sanity: expect native >= generic, and native comfortably above plain."
-echo "(paste these into the README Performance table.)"
+
+# Two distinct sanity checks (bug G3):
+#
+#  1. A zero/non-numeric row means a MEASUREMENT PATH IS BROKEN (e.g. the redirect
+#     target lost its XDP stub, or the plain frame's dst MAC went stale) - the
+#     number is meaningless, so hard-fail.
+#
+#  2. All rows non-zero but the expected ordering native>=generic>=plain does not
+#     hold is NOT a broken measurement - on a veth/virtio topology it is the
+#     honest result: veth is a software device, so "native" XDP has no driver
+#     advantage and its redirect actually costs more than the kernel's optimised
+#     veth forwarding path. The numbers are valid, just not evidence that native
+#     is faster - so suppress the "paste into the README" invitation, print a
+#     caveat, and exit 0. (Native's real advantage only shows on a hardware NIC
+#     doing xdpdrv before skb allocation.)
+broken=0
+for v in "$PPS_NATIVE" "$PPS_GENERIC" "$PPS_PLAIN"; do
+  [[ "$v" =~ ^[0-9]+$ ]] && (( v > 0 )) || broken=1
+done
+if (( broken )); then
+  echo "sanity: FAIL - a measurement path is broken (a row is zero/non-numeric)." >&2
+  echo "  native=$PPS_NATIVE generic=$PPS_GENERIC plain=$PPS_PLAIN pps" >&2
+  echo "  Do NOT publish these numbers. Check that veth-core1 has an XDP stub" >&2
+  echo "  (native/generic rows) and the core-ns route/rp_filter + fresh dst MAC" >&2
+  echo "  (plain row)." >&2
+  exit 1
+fi
+
+if awk -v n="$PPS_NATIVE" -v g="$PPS_GENERIC" -v p="$PPS_PLAIN" 'BEGIN{ exit !(n>=g && g>=p) }'; then
+  echo "sanity: OK - native ($PPS_NATIVE) >= generic ($PPS_GENERIC) >= plain ($PPS_PLAIN) pps."
+  echo "(paste these into the README Performance table.)"
+else
+  echo "sanity: all rows measured OK, but ordering native>=generic>=plain does NOT hold"
+  echo "  native=$PPS_NATIVE generic=$PPS_GENERIC plain=$PPS_PLAIN pps"
+  echo "  This is expected on a veth/virtio topology: all three paths are software"
+  echo "  and land within measurement noise, so these numbers do NOT demonstrate a"
+  echo "  native-XDP throughput advantage - do not paste them into the README as one."
+  echo "  Re-run on a hardware NIC that supports xdpdrv to show native's real edge."
+fi

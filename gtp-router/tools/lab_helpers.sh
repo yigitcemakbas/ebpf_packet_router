@@ -37,9 +37,24 @@ GTP_CTRL=./build/gtp-ctrl
 # `showteid all` know how many tunnels to enumerate.
 LAB_NAT_BASE="${NAT_IP_BASE:-${NAT_IP:-10.99.0.10}}"
 LAB_NUM_UES="${NUM_UES:-1}"
+# Per-UE mapping written by tools/lab_provision.sh at provisioning time (columns:
+# index uesimtunN UEIP uplinkTEID downlinkTEID NATIP). We read TEIDs from here
+# keyed by UE index rather than re-sniffing, because once a decap rule exists the
+# native XDP hook redirects the G-PDU before any AF_PACKET tap can see it - the
+# old re-capture missed and fell back to the FIRST map row for every UE (E1/E2).
+LAB_UESTATE="${LAB_UESTATE:-/tmp/gtp-lab-ues.tsv}"
 
 # nat_ip_for <i> - UE i's static-NAT egress address (last octet + i).
 nat_ip_for() { echo "${LAB_NAT_BASE%.*}.$(( ${LAB_NAT_BASE##*.} + ${1:-0} ))"; }
+
+# _ue_field <idx> <col> - column <col> (1-based) for UE <idx> from the state
+# file, or empty if the file or that UE's row is absent.
+#   1=index  2=uesimtunN  3=UEIP  4=uplinkTEID  5=downlinkTEID  6=NATIP
+_ue_field() {
+  local idx="${1:-0}" col="${2:-4}"
+  [ -f "$LAB_UESTATE" ] || return 0
+  awk -F'\t' -v i="$idx" -v c="$col" '$1==i {print $c; exit}' "$LAB_UESTATE"
+}
 
 # _elicit [idx]: push ONE round-trip through UE idx's tunnel so a G-PDU flies
 # past the tcpdump taps. Deliberately NOT a ping to an internet host: some LANs
@@ -71,12 +86,16 @@ _ueip() {
     | awk '{print $4}' | cut -d/ -f1
 }
 
-# _teid [idx]: capture UE idx's live uplink TEID (gNB->UPF) off the veth by
-# driving ONLY that UE. If nothing is visible (e.g. a drop rule is swallowing it
-# before the tap), fall back to the first TEID currently in teid_map. With
-# multiple UEs, only drive one UE at a time so this capture is unambiguous.
+# _teid [idx]: UE idx's uplink TEID (gNB->UPF). Prefer the value lab_provision.sh
+# recorded for this UE index (captured when it was still visible on the wire).
+# Only when there is no state file do we re-sniff by driving ONLY that UE, then
+# as a last resort take the first TEID in teid_map. Sniffing in steady state is
+# unreliable: once a decap rule exists the G-PDU is XDP-redirected before the tap
+# sees it, and the teid_map fallback returns the SAME first row for every UE.
 _teid() {
   local idx="${1:-0}" t
+  t=$(_ue_field "$idx" 4)
+  if [ -n "$t" ]; then echo "$t"; return; fi
   _elicit "$idx"
   t=$(sudo timeout 5 tcpdump -i "$LAB_VETH" -nn -x \
         "udp port 2152 and src $LAB_RAN_N3 and dst $LAB_HOST_N3" -c 1 2>/dev/null \
@@ -93,6 +112,8 @@ _teid() {
 # back to what is already provisioned in nat_map.
 _dlteid() {
   local idx="${1:-0}" ueip t
+  t=$(_ue_field "$idx" 5)
+  if [ -n "$t" ]; then echo "$t"; return; fi
   ueip=$(_ueip "$idx")
   if [ -n "$ueip" ]; then
     ( for k in 1 2 3 4; do sudo ping -c1 -W1 "$ueip" >/dev/null 2>&1; sleep 0.4; done ) &
@@ -134,9 +155,13 @@ _dmac() {
 showteid() {
   local sel="${1:-0}"
   if [ "$sel" = "all" ]; then
-    local u
+    # Declare the loop locals ONCE up front. The lab's control pane is zsh (Kali's
+    # root default shell), where re-running `local ip` on an already-set variable
+    # each iteration echoes "ip=<value>" to stdout - so assign, don't re-declare,
+    # inside the loop.
+    local u ip
     for (( u=0; u<LAB_NUM_UES; u++ )); do
-      local ip; ip=$(_ueip "$u")
+      ip=$(_ueip "$u")
       [ -z "$ip" ] && continue
       echo "UE $u  uesimtun$u  UEIP=$ip  TEID=$(_teid "$u")  NAT=$(nat_ip_for "$u")"
     done
@@ -196,9 +221,13 @@ ratelimit() {
   local pps="${1:-5}" idx="${2:-0}" t nat
   t=$(_teid "$idx"); nat=$(nat_ip_for "$idx")
   [ -z "$t" ] && { echo "no live TEID for UE $idx"; return 1; }
+  # Build the optional NAT flag as an array: an unquoted ${nat:+--nat-ip "$nat"}
+  # collapses into ONE argument ("--nat-ip 10.99.0.12"), which cobra rejects as
+  # an unknown flag - so ratelimit silently never worked with NAT set.
+  local natflag=(); [ -n "$nat" ] && natflag=(--nat-ip "$nat")
   sudo "$GTP_CTRL" add-teid --teid "$t" --action decap \
     --out-iface "$EGRESS_IFACE" --dmac "$(_dmac)" --smac "$(_smac)" \
-    ${nat:+--nat-ip "$nat"} \
+    "${natflag[@]}" \
     --rate-pps "$pps" && echo "rate-limit ${pps}pps set on $t (UE $idx)"
 }
 
@@ -206,9 +235,10 @@ quarantine() {
   local pps="${1:-5}" thr="${2:-3}" secs="${3:-30}" idx="${4:-0}" t nat
   t=$(_teid "$idx"); nat=$(nat_ip_for "$idx")
   [ -z "$t" ] && { echo "no live TEID for UE $idx"; return 1; }
+  local natflag=(); [ -n "$nat" ] && natflag=(--nat-ip "$nat")
   sudo "$GTP_CTRL" add-teid --teid "$t" --action decap \
     --out-iface "$EGRESS_IFACE" --dmac "$(_dmac)" --smac "$(_smac)" \
-    ${nat:+--nat-ip "$nat"} \
+    "${natflag[@]}" \
     --rate-pps "$pps" --quarantine-threshold "$thr" --quarantine-seconds "$secs" \
     && echo "quarantine set on $t (UE $idx, cap ${pps}pps, ${thr} windows, ${secs}s)"
 }

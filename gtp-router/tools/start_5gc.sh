@@ -22,6 +22,13 @@ OPEN5GS="${OPEN5GS:-/home/$(logname)/open5gs}"
 LOGDIR="/tmp/open5gs"
 MODE="start"
 
+# Address the UPF's N3 (GTP-U) and AMF's NGAP actually bind on. Defaults are the
+# stock Open5GS loopback values so standalone use is unchanged; tools/setup_ran.sh
+# rebinds both onto the RAN veth (HOST_N3) and passes N3_IP/NGAP_IP so the readiness
+# checks below probe the real bind address instead of timing out on the loopbacks.
+N3_IP="${N3_IP:-127.0.0.7}"
+NGAP_IP="${NGAP_IP:-127.0.0.5}"
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --open5gs) OPEN5GS="$2"; shift 2 ;;
@@ -130,10 +137,10 @@ start_nf smf  open5gs-smfd
 wait_port 127.0.0.4 8805 smf
 
 start_nf upf  open5gs-upfd
-wait_port 127.0.0.7 2152 upf
+wait_port "$N3_IP" 2152 upf
 
 start_nf amf  open5gs-amfd
-wait_port 127.0.0.5 38412 amf
+wait_port "$NGAP_IP" 38412 amf
 
 echo
 echo "All network functions started."
