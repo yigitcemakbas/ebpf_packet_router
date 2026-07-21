@@ -1,0 +1,4 @@
+rep	reaction_s	release_s	quarantine_confirmed	no_userspace_actor
+1	3.10	0.00	yes	yes
+2	3.10	0.00	yes	yes
+3	3.08	0.00	yes	yes
